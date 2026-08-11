@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Font Maker - TTF to Binary</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+h1 { margin-bottom: 8px; }
+section { margin: 20px 0; padding: 16px; border: 1px solid #ddd; border-radius: 6px; }
+label { display: block; font-weight: 600; margin-bottom: 4px; }
+input[type="text"], input[type="file"], select { width: 100%; padding: 6px; box-sizing: border-box; }
+input[type="text"] { font-size: 16px; margin-bottom: 8px; }
+.row { display: flex; gap: 16px; margin-top: 8px; }
+.row div { flex: 1; }
+#preview { margin-top: 12px; border: 1px solid #ccc; image-rendering: pixelated; display: none; }
+#status { margin-top: 12px; padding: 8px; border-radius: 4px; display: none; }
+#status.ok { background: #d4edda; color: #155724; }
+#status.err { background: #f8d7da; color: #721c24; }
+button { padding: 8px 20px; font-size: 14px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+button:hover { background: #0056b3; }
+button:disabled { background: #ccc; cursor: not-allowed; }
+button.size-preset { padding: 2px 8px; font-size: 12px; background: #6c757d; }
+button.size-preset:hover { background: #545b62; }
+button.size-preset.active { background: #007bff; }
+small { color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Font Maker</h1>
+<p>Upload a TTF font, enter characters, get a binary .bin font file.</p>
+
+<section>
+<label for="font-file">1. Upload TTF Font</label>
+<input type="file" id="font-file" accept=".ttf,.otf">
+<small>Font file will be loaded in browser only, never uploaded.</small>
+</section>
+
+<section>
+<label for="chars">2. Characters to Include</label>
+<input type="text" id="chars" value="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%" placeholder="Enter characters to convert">
+<small>Each character is stored by its Unicode code point (e.g., 'A'=0x41, '0'=0x30).</small>
+</section>
+
+<section>
+<label for="size">3. Size &amp; Format</label>
+<div class="row">
+<div>
+<label for="size">Pixel Height</label>
+<input type="number" id="size" value="12" min="4" max="200">
+<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">
+<button type="button" class="size-preset" data-size="8">8</button>
+<button type="button" class="size-preset" data-size="10">10</button>
+<button type="button" class="size-preset" data-size="12">12</button>
+<button type="button" class="size-preset" data-size="16">16</button>
+<button type="button" class="size-preset" data-size="20">20</button>
+<button type="button" class="size-preset" data-size="24">24</button>
+<button type="button" class="size-preset" data-size="32">32</button>
+<button type="button" class="size-preset" data-size="48">48</button>
+<button type="button" class="size-preset" data-size="64">64</button>
+<button type="button" class="size-preset" data-size="96">96</button>
+</div>
+</div>
+<div>
+<label for="format">Format</label>
+<select id="format">
+<option value="8bpp">8bpp (Anti-aliased)</option>
+<option value="1bpp">1bpp (Monochrome)</option>
+</select>
+</div>
+<div>
+<label for="spacing">Spacing</label>
+<select id="spacing">
+<option value="0">0</option>
+<option value="1">1</option>
+<option value="2">2</option>
+<option value="3">3</option>
+</select>
+</div>
+</div>
+</section>
+
+<section>
+<label>Preview</label>
+<canvas id="preview"></canvas>
+<p id="status"></p>
+</section>
+
+<section>
+<button id="convert">Generate .bin Font</button>
+<small id="info" style="display:block;margin-top:8px;"></small>
+</section>
+
+<script type="module">
+import init, { convert_atlas } from './pkg/font_maker_cli.js?v=8';
+
+const fontFile = document.getElementById('font-file');
+const charsInput = document.getElementById('chars');
+const sizeInput = document.getElementById('size');
+const formatSelect = document.getElementById('format');
+const spacingSelect = document.getElementById('spacing');
+const canvas = document.getElementById('preview');
+const status = document.getElementById('status');
+const convertBtn = document.getElementById('convert');
+const info = document.getElementById('info');
+
+let wasmReady = false;
+let loadedFont = null;
+
+async function loadWasm() {
+    try {
+        await init();
+        wasmReady = true;
+        console.log('WASM loaded');
+    } catch (e) {
+        showStatus('Failed to load WASM: ' + e.message, 'err');
+    }
+}
+
+async function loadFont(file) {
+    const buf = await file.arrayBuffer();
+    const name = 'CustomFont_' + Date.now();
+    const font = await new FontFace(name, buf).load();
+    document.fonts.add(font);
+    loadedFont = font;
+    console.log('Font loaded:', font.family, font.status);
+    showStatus('Font loaded: ' + name, 'ok');
+}
+
+function showStatus(msg, type) {
+    status.textContent = msg;
+    status.className = type;
+    status.style.display = 'block';
+    if (type === 'ok') setTimeout(() => { status.style.display = 'none'; }, 4000);
+}
+
+async function renderPreview() {
+    if (!loadedFont || !charsInput.value) {
+        canvas.style.display = 'none';
+        return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    const size = parseInt(sizeInput.value) || 12;
+    const fontFamily = loadedFont.family;
+    const text = charsInput.value;
+    const spacing = parseInt(spacingSelect.value) || 0;
+
+    const gap = spacing;
+    const fontStr = `${size}px "${fontFamily}"`;
+    ctx.font = fontStr;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+
+    // Measure each char width
+    const charWidths = [];
+    let totalWidth = 0;
+    for (const ch of text) {
+        const w = Math.ceil(ctx.measureText(ch).width);
+        charWidths.push(w);
+        totalWidth += w;
+    }
+
+    canvas.width = totalWidth + text.length * gap;
+    canvas.height = size;
+    canvas.style.display = 'block';
+
+    // Reset context after resize (canvas.width/height clears all settings)
+    ctx.font = fontStr;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+
+    // Clear to transparent
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Render chars in white (alpha=1) at alphabetic baseline
+    ctx.fillStyle = '#fff';
+    const baselineY = size * 0.75;
+    let x = 0;
+    for (let i = 0; i < text.length; i++) {
+        ctx.fillText(text[i], x, baselineY);
+        x += charWidths[i] + gap;
+    }
+
+    // Fill background with black (for preview display only, after scanning)
+    // Actually scan first while background is transparent
+
+    // Scan actual pixels for precise positions
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const charWidthsPrecise = [];
+    const charPositions = [];
+    x = 0;
+    for (let i = 0; i < text.length; i++) {
+        let minX = Infinity, maxX = -1;
+        for (let cx = 0; cx < charWidths[i] && x + cx < canvas.width; cx++) {
+            for (let y = 0; y < canvas.height; y++) {
+                const p = imgData.data[(y * canvas.width + x + cx) * 4];
+                if (p > 128) {
+                    if (cx < minX) minX = cx;
+                    if (cx > maxX) maxX = cx;
+                }
+            }
+        }
+        const w = (maxX + 1 - minX) || 1;
+        charWidthsPrecise.push(w);
+        charPositions.push(x + minX);
+        x += charWidths[i] + gap;
+    }
+
+    // Now fill background black for visible preview (doesn't affect stored imgData)
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#fff';
+    let x2 = 0;
+    for (let i = 0; i < text.length; i++) {
+        ctx.fillText(text[i], x2, baselineY);
+        x2 += charWidths[i] + gap;
+    }
+
+    showStatus('Preview rendered: ' + text.length + ' chars, ' + canvas.width + 'x' + canvas.height + ' (spacing=' + spacing + ')', 'ok');
+
+    // Store for export
+    window._charWidths = charWidthsPrecise;
+    window._charPositions = charPositions;
+    window._imgData = imgData; // Save transparent-background image data for WASM
+}
+
+convertBtn.addEventListener('click', async () => {
+    if (!wasmReady) {
+        showStatus('WASM not loaded yet...', 'err');
+        return;
+    }
+    if (!loadedFont) {
+        showStatus('Please upload a font first', 'err');
+        return;
+    }
+    if (!charsInput.value) {
+        showStatus('Please enter characters', 'err');
+        return;
+    }
+
+    convertBtn.disabled = true;
+    convertBtn.textContent = 'Generating...';
+    info.textContent = '';
+
+    try {
+        // Use stored image data (transparent background)
+        const imageData = window._imgData;
+        if (!imageData) {
+            showStatus('Please render preview first', 'err');
+            return;
+        }
+        const pixels = imageData.data; // Uint8ClampedArray
+
+        const spacing = parseInt(spacingSelect.value);
+        const format = formatSelect.value;
+        const size = parseInt(sizeInput.value) || 12;
+        const chars = charsInput.value;
+        const codePoints = Uint32Array.from(chars.split('').map(c => c.charCodeAt(0)));
+        const charWidths = Uint16Array.from(window._charWidths);
+        const charPositions = Uint32Array.from(window._charPositions);
+
+        const cropW = canvas.width;
+        const cropH = canvas.height;
+        const cropData = pixels;
+        console.log('WASM args:', { cropW, cropH, spacing, format });
+        console.log('codes:', [...codePoints]);
+        console.log('widths:', [...charWidths]);
+        console.log('positions:', [...charPositions]);
+        console.log('dataLen:', cropData.length, 'expected:', cropW * cropH * 4);
+        const bytes = (() => {
+            try {
+                console.log('Calling convert_atlas...', {
+                    cropW, cropH, spacing,
+                    cropDataLen: cropData.length,
+                    codePointsLen: codePoints.length,
+                    charWidthsLen: charWidths.length,
+                    charPositionsLen: charPositions.length
+                });
+                const result = convert_atlas(cropData, cropW, cropH, spacing, codePoints, charWidths, charPositions);
+                console.log('Result length:', result.length);
+                return result;
+            } catch (e) {
+                console.error('convert_atlas exception:', e);
+                console.error('Stack:', e.stack);
+                throw e;
+            }
+        })();
+        const charCount = codePoints.length;
+
+        // Download binary file
+        const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'font.bin';
+        a.click();
+        URL.revokeObjectURL(url);
+
+        info.textContent = `Done: ${charCount} characters, ${bytes.length} bytes`;
+        showStatus(`Font generated: ${charCount} chars, ${bytes.length} bytes`, 'ok');
+    } catch (e) {
+        showStatus('Error: ' + e.message, 'err');
+    } finally {
+        convertBtn.disabled = false;
+        convertBtn.textContent = 'Generate .bin Font';
+    }
+});
+
+fontFile.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+        await loadFont(file);
+        await renderPreview();
+    } catch (err) {
+        showStatus('Failed to load font: ' + err.message, 'err');
+    }
+});
+
+charsInput.addEventListener('input', () => { renderPreview(); });
+sizeInput.addEventListener('change', () => { renderPreview(); updateSizePresets(); });
+spacingSelect.addEventListener('change', () => { renderPreview(); });
+sizeInput.addEventListener('input', () => { updateSizePresets(); });
+
+document.querySelectorAll('.size-preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+        sizeInput.value = btn.dataset.size;
+        renderPreview();
+        updateSizePresets();
+    });
+});
+
+function updateSizePresets() {
+    document.querySelectorAll('.size-preset').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.size === sizeInput.value);
+    });
+}
+
+loadWasm();
+</script>
+
+</body>
+</html>

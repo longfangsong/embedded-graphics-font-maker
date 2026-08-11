@@ -1,0 +1,15 @@
+[package]
+name = "font-consumer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+font-maker-core = { path = "../font-maker-core", features = ["alloc"] }
+embedded-graphics = "0.8"
+
+[dev-dependencies]
+embedded-graphics-simulator = "0.6"
+hex = "0.4"
