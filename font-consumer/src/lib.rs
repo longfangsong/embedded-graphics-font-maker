@@ -1,3 +1,8 @@
+#![no_std]
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 fn blend_channel(bg: u8, fg: u8, alpha: u8) -> u8 {
     let a = alpha as u16;
     ((bg as u16 * (255 - a) + fg as u16 * a) / 255) as u8
@@ -261,6 +266,7 @@ impl<'a> Font<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use font_maker_core::format::{MAGIC, VERSION, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
     /// Build a minimal valid AA font with one glyph (code=65 'A', width=5, height=10).
@@ -332,6 +338,7 @@ mod tests {
 #[cfg(test)]
 mod text_renderer_tests {
     use super::*;
+    use alloc::vec;
     use embedded_graphics::{
         pixelcolor::Rgb888,
         prelude::*,
