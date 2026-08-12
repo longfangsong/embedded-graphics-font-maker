@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use std::fs;
+use std::io::Read;
 
 use font_maker_cli::convert;
 use font_maker_cli::render;
@@ -23,13 +25,14 @@ enum Commands {
         #[arg(short, long)]
         output: String,
 
-        /// Starting ASCII code (default: 0x20 space)
+        /// Starting ASCII code (default: 0x20 space). Ignored if --chars is provided.
         #[arg(long, default_value = "32")]
         start_code: u32,
 
-        /// Uniform inter-character spacing (default: 0)
-        #[arg(long, default_value = "0")]
-        spacing: u16,
+        /// Characters in the atlas, in left-to-right order. E.g. "A-Za-z0-9"
+        /// If not provided, characters are assigned sequentially starting at --start-code.
+        #[arg(long)]
+        chars: Option<String>,
 
         /// Pixel format: 8bpp or 1bpp (default: 8bpp)
         #[arg(long, default_value = "8bpp")]
@@ -84,10 +87,10 @@ fn main() {
             input,
             output,
             start_code,
-            spacing,
+            chars,
             format,
         } => {
-            if let Err(e) = run_convert(&input, &output, start_code, spacing, &format) {
+            if let Err(e) = run_convert(&input, &output, start_code, chars.as_deref(), &format) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -115,15 +118,12 @@ fn run_convert(
     input_path: &str,
     output_path: &str,
     start_code: u32,
-    spacing: u16,
+    chars: Option<&str>,
     format: &str,
 ) -> Result<(), String> {
-    use std::fs;
-    use std::io::Read;
-
     // Read PNG file.
-    let mut file = fs::File::open(input_path)
-        .map_err(|e| format!("Failed to open {}: {}", input_path, e))?;
+    let mut file =
+        fs::File::open(input_path).map_err(|e| format!("Failed to open {}: {}", input_path, e))?;
     let mut png_data = Vec::new();
     file.read_to_end(&mut png_data)
         .map_err(|e| format!("Failed to read {}: {}", input_path, e))?;
@@ -160,24 +160,34 @@ fn run_convert(
     }
 
     // Assign codes.
-    let coded_regions = convert::assign_codes(&regions, start_code);
+    let coded_regions = if let Some(chars_str) = chars {
+        let code_points: Vec<u32> = chars_str
+            .chars()
+            .map(|c| c as u32)
+            .collect();
+        if code_points.len() != regions.len() {
+            return Err(format!(
+                "Character count mismatch: --chars has {} chars but {} regions detected",
+                code_points.len(),
+                regions.len()
+            ));
+        }
+        convert::zip_codes(&regions, &code_points)
+    } else {
+        convert::assign_codes(&regions, start_code)
+    };
 
     // Generate binary font.
-    let font_bytes = convert::generate_binary_font(
-        &coded_regions,
-        &buffer,
-        width,
-        height,
-        spacing,
-        format,
-    )?;
+    let font_bytes = convert::generate_binary_font(&coded_regions, &buffer, width, height, format)?;
 
     // Write output file.
     fs::write(output_path, &font_bytes)
         .map_err(|e| format!("Failed to write {}: {}", output_path, e))?;
 
-    println!("Binary font written to {} ({} bytes)", output_path, font_bytes.len());
+    println!(
+        "Binary font written to {} ({} bytes)",
+        output_path,
+        font_bytes.len()
+    );
     Ok(())
 }
-
-

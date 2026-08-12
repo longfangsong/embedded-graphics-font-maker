@@ -21,8 +21,8 @@
 3. As an embedded developer, I want the binary font to optionally support monochrome (1bpp) rendering, so that I can save flash space when AA is not needed.
 4. As an embedded developer, I want the CLI to automatically detect character boundaries from a single-row PNG, so that I don't need to manually configure each character's position.
 5. As an embedded developer, I want the auto-detected character codes to be configurable (starting ASCII code), so that I can map characters to whatever codes I need.
-6. As an embedded developer, I want the advance width (horizontal step per character) to be a uniform font-level configuration, so that text layout is consistent and predictable.
-7. As an embedded developer, I want to override the auto-detected advance width via CLI, so that I can fine-tune spacing for my specific layout.
+6. As an embedded developer, I want character spacing to be configurable at render time, so that the same font can be reused with different layout requirements.
+7. As an embedded developer, I want to override character spacing in the renderer, so that I can fine-tune layout for my specific display.
 8. As an embedded developer, I want to load a binary font from a `&[u8]` byte slice, so that I can use it whether the data comes from `include_bytes!` (flash), file system, or network.
 9. As an embedded developer, I want the consumer crate to implement `embedded_graphics::text::renderer::TextRenderer`, so that I can use it with embedded_graphics's text rendering infrastructure.
 10. As an embedded developer, I want AA glyphs to be rendered with src-over alpha blending, so that text blends smoothly with arbitrary backgrounds.
@@ -37,7 +37,7 @@
 
 ### Binary Font Format v1
 
-**Header** (20 bytes total):
+**Header** (12 bytes total):
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -45,7 +45,6 @@
 | version | `u8` | `1` — format version |
 | pixel_format | `u8` | `0` = monochrome (1bpp), `1` = anti-aliased (8bpp) |
 | height | `u16` | Uniform glyph height (all glyphs share this) |
-| advance_width | `u16` | Uniform horizontal advance per character |
 | char_count | `u32` | Number of glyphs |
 
 **Per-glyph table** (10 bytes each, stored after header):
@@ -69,12 +68,11 @@
 - Consumer renders differently based on format: 8bpp does direct alpha blending; 1bpp extracts bits on-the-fly (roughly 4-6× slower per pixel, but 8× smaller).
 - The consumer does not need to decompress 1bpp into a full buffer — it extracts bits during the blending loop.
 
-### Advance Width
+### Character Spacing
 
-- `advance_width` is a single font-level value stored in the Header.
-- All characters advance by this fixed amount after rendering, regardless of their actual width.
-- This treats the font as a grid of character cells — the PNG is just a character atlas, and inter-character spacing in the PNG has no semantic meaning.
-- Narrower characters will have unused space on the right within their cell.
+- Spacing is a render-time concern, not stored in the font. The font describes only glyph pixels.
+- The consumer (renderer) specifies spacing as a layout parameter. A default of 2 is used if unspecified.
+- This keeps the font reusable across different layout requirements without re-conversion.
 
 ### PNG Auto-Detection
 

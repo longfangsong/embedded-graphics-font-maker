@@ -11,7 +11,8 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{renderer::TextRenderer, Baseline, Text};
 use embedded_graphics_simulator::SimulatorDisplay;
-use font_consumer::{Font, FontTextStyle};
+use font_consumer::FontTextStyle;
+use font_maker_core::format::Font as CoreFont;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -21,7 +22,7 @@ fn main() {
     }
 
     let font_data = fs::read(&args[1]).unwrap();
-    let font = Font::new(&font_data).unwrap();
+    let font = CoreFont::new(&font_data).unwrap();
     let text = &args[2];
 
     // Use Rgb565 (16-bit color, common in embedded displays)

@@ -1,11 +1,10 @@
 #![no_std]
+extern crate alloc;
 
 fn blend_channel(bg: u8, fg: u8, alpha: u8) -> u8 {
     let a = alpha as u16;
     ((bg as u16 * (255 - a) + fg as u16 * a) / 255) as u8
 }
-
-use core::marker::PhantomData;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -18,7 +17,7 @@ use embedded_graphics::{
     },
     Pixel,
 };
-use font_maker_core::format::{Font as CoreFont, GlyphEntry, Header, PixelFormat};
+use font_maker_core::format::{Font as CoreFont, GlyphEntry, PixelFormat};
 use font_maker_core::error::FontError;
 
 /// Zero-alloc iterator over pixels of a single glyph.
@@ -31,10 +30,10 @@ struct GlyphPixelIter<'a, C> {
     bg8: Rgb888,
     fmt: PixelFormat,
     idx: usize,
-    _marker: PhantomData<C>,
+    _marker: core::marker::PhantomData<C>,
 }
 
-impl<'a, C: PixelColor + From<Rgb888>> Iterator for GlyphPixelIter<'a, C> {
+impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> Iterator for GlyphPixelIter<'a, C> {
     type Item = Pixel<C>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -74,7 +73,7 @@ impl<'a, C: PixelColor + From<Rgb888>> Iterator for GlyphPixelIter<'a, C> {
                         let py = (bit_idx / self.width) as i32;
                         return Some(Pixel(
                             Point::new(self.pos.x + px, self.pos.y + py),
-                            self.fg8.into(),
+                            C::from(self.fg8),
                         ));
                     }
                 }
@@ -100,18 +99,18 @@ pub struct CharacterBounds {
 #[derive(Debug, Clone)]
 pub struct FontTextStyle<'a, C> {
     /// Font reference.
-    pub font: &'a Font<'a>,
+    pub font: &'a CoreFont<'a>,
     /// Text color.
     pub text_color: C,
     /// Background color (optional).
     pub background_color: Option<C>,
-    /// Additional character spacing override. Uses font header spacing if 0.
+    /// Character spacing. Defaults to 2 if None.
     pub char_spacing: Option<u32>,
 }
 
 impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
     /// Create a new text style with the given font and text color.
-    pub fn new(font: &'a Font<'a>, text_color: C) -> Self {
+    pub fn new(font: &'a CoreFont<'a>, text_color: C) -> Self {
         Self {
             font,
             text_color,
@@ -137,12 +136,12 @@ impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
     where
         D: DrawTarget<Color = C>,
     {
-        let glyph = self.font.get_glyph_entry(c).expect("glyph not found");
+        let glyph = self.font.get_glyph_entry(c as u32).expect("glyph not found");
         let data = self.font.glyph_data(&glyph);
         let width = glyph.width as usize;
-        let height = self.font.header().height as usize;
+        let height = self.font.header.height as usize;
         let fg8: Rgb888 = self.text_color.into();
-        let bg8: Rgb888 = self.background_color.map(Into::into).unwrap_or(Rgb888::BLACK);
+        let bg8: Rgb888 = self.background_color.map(|c| c.into()).unwrap_or(Rgb888::BLACK);
 
         target.draw_iter(GlyphPixelIter {
             data,
@@ -151,21 +150,13 @@ impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
             pos,
             fg8,
             bg8,
-            fmt: self.font.pixel_format(),
+            fmt: self.font.header.pixel_format,
             idx: 0,
-            _marker: PhantomData,
+            _marker: core::marker::PhantomData,
         })?;
 
         Ok(glyph.width as u32)
     }
-}
-
-/// A loaded binary font.
-///
-/// Wraps the parsed font data and exposes consumer-side APIs.
-#[derive(Debug, Clone)]
-pub struct Font<'a> {
-    inner: CoreFont<'a>,
 }
 
 impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle<'_, C> {
@@ -181,7 +172,7 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
     where
         D: DrawTarget<Color = Self::Color>,
     {
-        let height = self.font.header().height as i32;
+        let height = self.font.header.height as i32;
         let y_offset = match baseline {
             Baseline::Top => 0,
             Baseline::Alphabetic => 0,
@@ -190,10 +181,10 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
         };
         let mut x = position.x;
         let y = position.y + y_offset;
-        let spacing = self.char_spacing.unwrap_or(self.font.header().spacing as u32) as i32;
+        let spacing = self.char_spacing.unwrap_or(2) as i32;
 
         for c in text.chars() {
-            if let Some(entry) = self.font.get_glyph_entry(c) {
+            if let Some(entry) = self.font.get_glyph_entry(c as u32) {
                 self.draw_char(c, Point::new(x, y), target)?;
                 x += entry.width as i32 + spacing;
             }
@@ -217,10 +208,10 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
 
     fn measure_string(&self, text: &str, position: Point, _baseline: Baseline) -> TextMetrics {
         let mut width: u32 = 0;
-        let spacing = self.char_spacing.unwrap_or(self.font.header().spacing as u32);
+        let spacing = self.char_spacing.unwrap_or(2);
 
         for (i, c) in text.chars().enumerate() {
-            if let Some(entry) = self.font.get_glyph_entry(c) {
+            if let Some(entry) = self.font.get_glyph_entry(c as u32) {
                 width += entry.width as u32;
                 if i < text.chars().count() - 1 {
                     width += spacing;
@@ -228,7 +219,7 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
             }
         }
 
-        let height = self.font.header().height as u32;
+        let height = self.font.header.height as u32;
         let bb = Rectangle::new(position, Size::new(width, height));
         let next_pos = Point::new(position.x + width as i32, position.y);
 
@@ -239,67 +230,28 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
     }
 
     fn line_height(&self) -> u32 {
-        self.font.header().height as u32
+        self.font.header.height as u32
     }
 }
 
-impl<'a> Font<'a> {
-    /// Load a font from a byte slice.
-    pub fn new(data: &'a [u8]) -> Result<Self, FontError> {
-        Ok(Font { inner: CoreFont::new(data)? })
-    }
 
-    /// Access the parsed font header.
-    pub fn header(&self) -> &Header {
-        &self.inner.header
-    }
-
-    /// Return the pixel format of this font.
-    pub fn pixel_format(&self) -> PixelFormat {
-        self.inner.header.pixel_format
-    }
-
-    /// Return the glyph entry for a character (lazy parse).
-    pub fn get_glyph_entry(&self, c: char) -> Option<GlyphEntry> {
-        self.inner.get_glyph_entry(c as u32)
-    }
-
-    /// Return the bounds of a character if it exists in this font.
-    pub fn character_bounds(&self, c: char) -> Option<CharacterBounds> {
-        self.inner.get_glyph_entry(c as u32).map(|g| CharacterBounds {
-            width: g.width,
-            height: self.inner.header.height,
-        })
-    }
-
-    /// Return a slice pointing to the raw glyph data for the given entry.
-    pub fn glyph_data(&self, entry: &GlyphEntry) -> &[u8] {
-        self.inner.glyph_data(entry)
-    }
-
-    /// Return glyph data by code point.
-    pub fn glyph_data_by_code(&self, code: u32) -> Option<&[u8]> {
-        self.inner.get_glyph_entry(code).map(|e| self.inner.glyph_data(&e))
-    }
-
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
     use font_maker_core::format::{MAGIC, VERSION, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
     /// Build a minimal valid AA font with one glyph (code=65 'A', width=5, height=10).
     fn make_test_font_data() -> Vec<u8> {
         let mut buf = Vec::new();
-        // Header (14 bytes)
+        // Header (12 bytes)
         buf.extend_from_slice(&MAGIC);                    // 0..4
         buf.push(VERSION);                                // 4
         buf.push(PixelFormat::AntiAliased as u8);        // 5
         buf.extend_from_slice(&10u16.to_le_bytes());     // 6..7 height
-        buf.extend_from_slice(&0u16.to_le_bytes());      // 8..9 spacing
-        buf.extend_from_slice(&1u32.to_le_bytes());      // 10..13 char_count
+        buf.extend_from_slice(&1u32.to_le_bytes());      // 8..11 char_count
         // Glyph entry (10 bytes)
         buf.extend_from_slice(&65u32.to_le_bytes());     // code
         buf.extend_from_slice(&5u16.to_le_bytes());      // width
@@ -313,43 +265,43 @@ mod tests {
     #[test]
     fn valid_binary_slice_loads() {
         let data = make_test_font_data();
-        let font = Font::new(&data).expect("load font");
-        assert_eq!(font.pixel_format(), PixelFormat::AntiAliased);
+        let font = CoreFont::new(&data).expect("load font");
+        assert_eq!(font.header.pixel_format, PixelFormat::AntiAliased);
     }
 
     #[test]
     fn truncated_slice_returns_error() {
         // Header too short
         let short = &MAGIC[..3];
-        assert!(matches!(Font::new(short), Err(FontError::TruncatedFile)));
+        assert!(matches!(CoreFont::new(short), Err(FontError::TruncatedFile)));
 
         // Header present but glyph table truncated
         let mut buf = make_test_font_data();
         buf.truncate(HEADER_SIZE + GLYPH_ENTRY_SIZE - 1);
-        assert!(matches!(Font::new(&buf), Err(FontError::TruncatedFile)));
+        assert!(matches!(CoreFont::new(&buf), Err(FontError::TruncatedFile)));
     }
 
     #[test]
     fn character_bounds_known_code() {
         let data = make_test_font_data();
-        let font = Font::new(&data).unwrap();
-        let bounds = font.character_bounds('A').expect("A exists");
-        assert_eq!(bounds.width, 5);
-        assert_eq!(bounds.height, 10);
+        let font = CoreFont::new(&data).unwrap();
+        let entry = font.get_glyph_entry(0x41).expect("A exists");
+        assert_eq!(entry.width, 5);
+        assert_eq!(font.header.height, 10);
     }
 
     #[test]
     fn character_bounds_unknown_code() {
         let data = make_test_font_data();
-        let font = Font::new(&data).unwrap();
-        assert!(font.character_bounds('Z').is_none());
+        let font = CoreFont::new(&data).unwrap();
+        assert!(font.get_glyph_entry(0x5A).is_none());
     }
 
     #[test]
     fn glyph_data_returns_correct_slice() {
         let data = make_test_font_data();
-        let font = Font::new(&data).unwrap();
-        let entry = font.get_glyph_entry('A').unwrap();
+        let font = CoreFont::new(&data).unwrap();
+        let entry = font.get_glyph_entry(0x41).unwrap();
         let pixel_data = font.glyph_data(&entry);
         assert_eq!(pixel_data.len(), 50); // 5x10 AA
         assert!(pixel_data.iter().all(|&v| v == 255));
@@ -360,6 +312,7 @@ mod tests {
 mod text_renderer_tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
     use embedded_graphics::{
         pixelcolor::Rgb888,
         prelude::*,
@@ -369,14 +322,13 @@ mod text_renderer_tests {
     use font_maker_core::format::{MAGIC, VERSION, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
     fn make_two_char_font() -> Vec<u8> {
-        // A (code=65) at x=0..5, B (code=66) at x=7..12 (spacing=2)
+        // A (code=65) at x=0..5, B (code=66) at x=7..12
         let mut buf = Vec::new();
-        // Header
+        // Header (12 bytes)
         buf.extend_from_slice(&MAGIC);
         buf.push(VERSION);
         buf.push(PixelFormat::AntiAliased as u8);
         buf.extend_from_slice(&10u16.to_le_bytes()); // height
-        buf.extend_from_slice(&2u16.to_le_bytes());  // spacing
         buf.extend_from_slice(&2u32.to_le_bytes());  // char_count
         // Glyph A
         buf.extend_from_slice(&65u32.to_le_bytes());
@@ -399,13 +351,13 @@ mod text_renderer_tests {
     #[test]
     fn text_renderer_draws_single_char() {
         let font_data = make_two_char_font();
-        let font = Font::new(&font_data).unwrap();
+        let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(10, 10));
         let next = style.draw_string("A", Point::new(0, 10), embedded_graphics::text::Baseline::Bottom, &mut display).unwrap();
 
-        // Next position should be after char A: x = 0 + width(5) + spacing(2) = 7
+        // Next position: x = 0 + width(5) + default_spacing(2) = 7
         assert_eq!(next.x, 7);
 
         // A is solid white, so 5x10 pixels should be white
@@ -423,7 +375,7 @@ mod text_renderer_tests {
     #[test]
     fn text_renderer_draws_multiple_chars_with_spacing() {
         let font_data = make_two_char_font();
-        let font = Font::new(&font_data).unwrap();
+        let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(12, 10));
@@ -449,7 +401,7 @@ mod text_renderer_tests {
     #[test]
     fn text_renderer_measure_string() {
         let font_data = make_two_char_font();
-        let font = Font::new(&font_data).unwrap();
+        let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let metrics = style.measure_string("AB", Point::new(0, 10), embedded_graphics::text::Baseline::Bottom);
@@ -462,7 +414,7 @@ mod text_renderer_tests {
     #[test]
     fn text_renderer_line_height() {
         let font_data = make_two_char_font();
-        let font = Font::new(&font_data).unwrap();
+        let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         assert_eq!(style.line_height(), 10);
@@ -472,7 +424,7 @@ mod text_renderer_tests {
     fn text_primitives_integration() {
         // Test using Text primitive directly with our renderer
         let font_data = make_two_char_font();
-        let font = Font::new(&font_data).unwrap();
+        let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(20, 10));

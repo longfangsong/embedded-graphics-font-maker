@@ -40,7 +40,6 @@ fn convert_png_to_binary() {
         &pixels,
         width,
         height,
-        5, // spacing
         "8bpp",
     )
     .unwrap();
@@ -49,26 +48,26 @@ fn convert_png_to_binary() {
     assert_eq!(&font_bytes[0..4], b"EFM1");
 
     // Verify header.
-    let font = font_consumer::Font::new(&font_bytes).unwrap();
-    let hdr = font.header();
+    let font = font_maker_core::format::Font::new(&font_bytes).unwrap();
+    let hdr = &font.header;
     assert_eq!(hdr.char_count, 2);
     assert_eq!(hdr.height, 10);
-    assert_eq!(hdr.spacing, 5);
     assert_eq!(hdr.pixel_format, font_maker_core::format::PixelFormat::AntiAliased);
 
     // Verify glyphs.
-    assert_eq!(font.glyphs().len(), 2);
-    assert_eq!(font.glyphs()[0].code, 0x41);
-    assert_eq!(font.glyphs()[0].width, 5);
-    assert_eq!(font.glyphs()[1].code, 0x42);
-    assert_eq!(font.glyphs()[1].width, 5);
+    let entry_a = font.get_glyph_entry(0x41).unwrap();
+    let entry_b = font.get_glyph_entry(0x42).unwrap();
+    assert_eq!(entry_a.code, 0x41);
+    assert_eq!(entry_a.width, 5);
+    assert_eq!(entry_b.code, 0x42);
+    assert_eq!(entry_b.width, 5);
 
     // Verify glyph data.
-    let data_a = font.glyph_data_by_code(0x41).unwrap();
+    let data_a = font.glyph_data(&entry_a);
     assert_eq!(data_a.len(), 50); // 5×10
     assert!(data_a.iter().all(|&b| b == 255));
 
-    let data_b = font.glyph_data_by_code(0x42).unwrap();
+    let data_b = font.glyph_data(&entry_b);
     assert_eq!(data_b.len(), 50);
     assert!(data_b.iter().all(|&b| b == 255));
 }
@@ -96,16 +95,16 @@ fn convert_mono_format() {
         &pixels,
         width,
         height,
-        8,
         "1bpp",
     )
     .unwrap();
 
-    let font = font_consumer::Font::new(&font_bytes).unwrap();
-    assert_eq!(font.header().pixel_format, font_maker_core::format::PixelFormat::Monochrome);
+    let font = font_maker_core::format::Font::new(&font_bytes).unwrap();
+    assert_eq!(font.header.pixel_format, font_maker_core::format::PixelFormat::Monochrome);
 
     // 8×8 mono = 8 bytes.
-    let data = font.glyph_data_by_code(0x41).unwrap();
+    let entry = font.get_glyph_entry(0x41).unwrap();
+    let data = font.glyph_data(&entry);
     assert_eq!(data.len(), 8);
 }
 
@@ -133,7 +132,6 @@ fn render_creates_png() {
         &pixels,
         width,
         height,
-        10,
         "8bpp",
     )
     .unwrap();

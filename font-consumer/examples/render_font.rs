@@ -19,8 +19,8 @@ use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{renderer::TextRenderer, Baseline, Text};
 use embedded_graphics_simulator::{OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent};
-use font_consumer::Font;
 use font_consumer::FontTextStyle;
+use font_maker_core::format::Font as CoreFont;
 
 fn parse_color(arg: &str) -> Option<Rgb888> {
     let hex = arg.trim_start_matches('#');
@@ -117,7 +117,7 @@ fn main() {
         process::exit(1);
     });
 
-    let font = Font::new(&font_data).unwrap_or_else(|e| {
+    let font = CoreFont::new(&font_data).unwrap_or_else(|e| {
         eprintln!("Failed to load font: {}", e);
         process::exit(1);
     });

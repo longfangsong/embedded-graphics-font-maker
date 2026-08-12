@@ -1,13 +1,14 @@
 use embedded_graphics::{
     pixelcolor::Rgb888,
     prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
-    Pixel,
+    text::{renderer::TextRenderer, Baseline, Text},
 };
 use embedded_graphics_simulator::{OutputSettingsBuilder, SimulatorDisplay};
+use font_consumer::FontTextStyle;
 use std::fs;
 
 /// Render a text string from a binary font to a preview PNG.
+/// Delegates to font-consumer's FontTextStyle (TextRenderer).
 pub fn run_render(
     input_path: &str,
     output_path: &str,
@@ -17,37 +18,15 @@ pub fn run_render(
     origin_x: i32,
     origin_y: i32,
 ) -> Result<(), String> {
-    // Read binary font.
     let font_data = fs::read(input_path)
         .map_err(|e| format!("Failed to read {}: {}", input_path, e))?;
 
-    // Parse font.
-    let font = font_consumer::Font::new(&font_data)
+    let font = font_maker_core::format::Font::new(&font_data)
         .map_err(|e| format!("Failed to parse font: {:?}", e))?;
 
-    let hdr = font.header();
-    eprintln!("Font loaded: {} characters, {}x{}",
-        hdr.char_count, hdr.spacing, hdr.height);
+    eprintln!("Font loaded: {} characters, height={}",
+        font.header.char_count, font.header.height);
 
-    // Calculate output size.
-    // Width = sum of all character widths + (num_chars - 1) * spacing
-    let text_width: i32 = if text.len() > 0 {
-        let widths: i32 = text.chars().map(|ch| {
-            font.get_glyph_entry(ch)
-                .map(|g| g.width as i32)
-                .unwrap_or(0)
-        }).sum();
-        widths + (text.len() as i32 - 1) * hdr.spacing as i32
-    } else {
-        0
-    };
-    let height = hdr.height as i32;
-
-    // Create display.
-    let size = embedded_graphics::geometry::Size::new(text_width as u32, height as u32);
-    let mut display = SimulatorDisplay::<Rgb888>::new(size);
-
-    // Fill background.
     let bg = Rgb888::new(
         ((bg_color >> 16) & 0xFF) as u8,
         ((bg_color >> 8) & 0xFF) as u8,
@@ -59,52 +38,24 @@ pub fn run_render(
         (fg_color & 0xFF) as u8,
     );
 
-    Rectangle::new(Point::new(0, 0), size)
-        .into_styled(PrimitiveStyle::with_fill(bg))
-        .draw(&mut display)
-        .map_err(|e| format!("Draw error: {:?}", e))?;
+    let style = FontTextStyle::new(&font, fg).background_color(bg);
+    let metrics = style.measure_string(text, Point::zero(), Baseline::Top);
+    let width = (metrics.bounding_box.size.width as i32 + origin_x).max(1);
+    let height = font.header.height as i32;
 
-    // Render text.
-    let mut x = origin_x;
-    let y = origin_y;
+    let size = Size::new(width as u32, height as u32);
+    let mut display = SimulatorDisplay::<Rgb888>::new(size);
+    display.clear(bg).map_err(|e| format!("Draw error: {:?}", e))?;
 
-    for ch in text.chars() {
-        let code = ch as u32;
-        let glyph_width = font.get_glyph_entry(ch)
-            .map(|g| g.width as i32)
-            .unwrap_or(0);
-        
-        if let Some(glyph_data) = font.glyph_data_by_code(code) {
-            let glyph_height = font.header().height as i32;
-            
-            let mut pixels = Vec::new();
-            for gy in 0..glyph_height {
-                for gx in 0..glyph_width {
-                    let px_idx = (gy * glyph_width + gx) as usize;
-                    if px_idx < glyph_data.len() {
-                        let alpha = glyph_data[px_idx] as f32 / 255.0;
-                        if alpha > 0.0 {
-                            let color = Rgb888::new(
-                                (fg.r() as f32 * alpha) as u8,
-                                (fg.g() as f32 * alpha) as u8,
-                                (fg.b() as f32 * alpha) as u8,
-                            );
-                            let point = Point::new(x + gx as i32, y + gy as i32);
-                            if display.bounding_box().contains(point) {
-                                pixels.push(Pixel(point, color));
-                            }
-                        }
-                    }
-                }
-            }
-            display.draw_iter(pixels.into_iter())
-                .map_err(|e| format!("Draw error: {:?}", e))?;
-        }
-        // Move to next character: current width + spacing
-        x += glyph_width + font.header().spacing as i32;
-    }
+    Text::with_baseline(
+        text,
+        Point::new(origin_x, origin_y),
+        style,
+        Baseline::Top,
+    )
+    .draw(&mut display)
+    .map_err(|e| format!("Draw error: {:?}", e))?;
 
-    // Save output.
     let output_settings = OutputSettingsBuilder::new().scale(1).build();
     let output_image = display.to_rgb_output_image(&output_settings);
     output_image.save_png(output_path)
@@ -142,7 +93,6 @@ mod tests {
             &pixels,
             width,
             height,
-            10,
             "8bpp",
         )
         .unwrap();

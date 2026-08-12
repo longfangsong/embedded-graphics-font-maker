@@ -1,4 +1,5 @@
 use std::vec::Vec;
+use font_maker_core::format::{GlyphEntry, MAGIC, VERSION, PixelFormat, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
 /// A detected character region in the PNG atlas.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,25 +69,35 @@ pub fn detect_character_regions(pixels: &[u8], width: u32, height: u32) -> Vec<C
     regions
 }
 
-/// Assign ASCII codes to character regions, starting from the given base code.
+/// Zip character regions with caller-supplied code points.
 ///
 /// # Arguments
 /// * `regions` - Sorted character regions
-/// * `start_code` - First ASCII code to assign
+/// * `code_points` - Code points to assign, one per region (in order)
 ///
 /// # Returns
-/// A vector of (code, region) pairs.
-pub fn assign_codes(regions: &[CharacterRegion], start_code: u32) -> Vec<(u32, CharacterRegion)> {
+/// A vector of (code, region) pairs, or empty if lengths don't match.
+pub fn zip_codes(regions: &[CharacterRegion], code_points: &[u32]) -> Vec<(u32, CharacterRegion)> {
+    if regions.len() != code_points.len() {
+        return vec![];
+    }
     regions
         .iter()
-        .enumerate()
-        .map(|(i, region)| (start_code + i as u32, region.clone()))
+        .zip(code_points.iter())
+        .map(|(region, &code)| (code, region.clone()))
         .collect()
 }
 
-/// Calculate the maximum width across all character regions.
-pub fn max_width(regions: &[CharacterRegion]) -> u16 {
-    regions.iter().map(|r| r.width).max().unwrap_or(0)
+/// Assign sequential codes starting from the given base.
+///
+/// Convenience wrapper around `zip_codes` for the common sequential case.
+pub fn assign_codes(regions: &[CharacterRegion], start_code: u32) -> Vec<(u32, CharacterRegion)> {
+    let codes: Vec<u32> = regions
+        .iter()
+        .enumerate()
+        .map(|(i, _)| start_code + i as u32)
+        .collect();
+    zip_codes(regions, &codes)
 }
 
 /// Generate binary font bytes from character regions and pixel data.
@@ -96,7 +107,6 @@ pub fn max_width(regions: &[CharacterRegion]) -> u16 {
 /// * `pixels` - RGBA pixel data
 /// * `width` - Image width in pixels
 /// * `height` - Image height in pixels
-/// * `spacing` - Uniform inter-character spacing
 /// * `pixel_format` - "8bpp" or "1bpp"
 ///
 /// # Returns
@@ -106,10 +116,8 @@ pub fn generate_binary_font(
     pixels: &[u8],
     width: u32,
     height: u32,
-    spacing: u16,
     pixel_format: &str,
 ) -> Result<Vec<u8>, String> {
-    use font_maker_core::format::{GlyphEntry, MAGIC, VERSION, PixelFormat, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
     let pf = match pixel_format {
         "8bpp" => PixelFormat::AntiAliased,
@@ -168,7 +176,6 @@ pub fn generate_binary_font(
     buf.push(VERSION);
     buf.push(pf as u8);
     buf.extend_from_slice(&h.to_le_bytes());
-    buf.extend_from_slice(&spacing.to_le_bytes());
     buf.extend_from_slice(&(coded_regions.len() as u32).to_le_bytes());
 
     for entry in &glyphs {
@@ -197,6 +204,10 @@ fn pack_mono_bits(bits: &[u8], total_pixels: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn max_width(regions: &[CharacterRegion]) -> u16 {
+        regions.iter().map(|r| r.width).max().unwrap_or(0)
+    }
 
     #[test]
     fn empty_image_returns_no_regions() {
@@ -290,6 +301,33 @@ mod tests {
     }
 
     #[test]
+    fn zip_codes_pairs_regions_with_supplied_codes() {
+        let regions = vec![
+            CharacterRegion { x: 0, width: 4 },
+            CharacterRegion { x: 4, width: 3 },
+            CharacterRegion { x: 7, width: 5 },
+        ];
+        // Arbitrary codes: 'Z', 'A', '0'
+        let codes = vec![0x5Au32, 0x41u32, 0x30u32];
+        let coded = zip_codes(&regions, &codes);
+        assert_eq!(
+            coded,
+            vec![
+                (0x5A, CharacterRegion { x: 0, width: 4 }),
+                (0x41, CharacterRegion { x: 4, width: 3 }),
+                (0x30, CharacterRegion { x: 7, width: 5 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn zip_codes_returns_empty_on_mismatch() {
+        let regions = vec![CharacterRegion { x: 0, width: 4 }];
+        let codes = vec![0x41u32, 0x42u32]; // 2 codes, 1 region
+        assert!(zip_codes(&regions, &codes).is_empty());
+    }
+
+    #[test]
     fn max_width_returns_zero_for_empty() {
         let regions: Vec<CharacterRegion> = vec![];
         assert_eq!(max_width(&regions), 0);
@@ -320,7 +358,7 @@ mod tests {
         assert_eq!(regions.len(), 1);
 
         let coded = assign_codes(&regions, 0x41);
-        let font_bytes = generate_binary_font(&coded, &pixels, 10, 4, 10, "8bpp");
+        let font_bytes = generate_binary_font(&coded, &pixels, 10, 4, "8bpp");
         assert!(font_bytes.is_ok());
 
         let bytes = font_bytes.unwrap();
@@ -332,10 +370,8 @@ mod tests {
         assert_eq!(bytes[5], 1);
         // Verify height (4)
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 4);
-        // Verify spacing (10)
-        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 10);
         // Verify char_count (1)
-        assert_eq!(u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]), 1);
+        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 1);
     }
 
     #[test]
@@ -351,7 +387,7 @@ mod tests {
 
         let regions = detect_character_regions(&pixels, 8, 8);
         let coded = assign_codes(&regions, 0x41);
-        let font_bytes = generate_binary_font(&coded, &pixels, 8, 8, 8, "1bpp");
+        let font_bytes = generate_binary_font(&coded, &pixels, 8, 8, "1bpp");
         assert!(font_bytes.is_ok());
 
         let bytes = font_bytes.unwrap();
@@ -364,7 +400,7 @@ mod tests {
     #[test]
     fn invalid_pixel_format_returns_error() {
         let regions: Vec<(u32, CharacterRegion)> = vec![];
-        let result = generate_binary_font(&regions, &[], 0, 0, 0, "invalid");
+        let result = generate_binary_font(&regions, &[], 0, 0, "invalid");
         assert!(result.is_err());
     }
 }

@@ -1,5 +1,5 @@
 use crate::error::FontError;
-use crate::format::{Font, MAGIC, PixelFormat, HEADER_SIZE, GLYPH_ENTRY_SIZE};
+use crate::format::{Font, MAGIC, PixelFormat, HEADER_SIZE, GLYPH_ENTRY_SIZE, glyph_data_size};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 fn make_valid_font(
     pixel_format: PixelFormat,
     height: u16,
-    spacing: u16,
     glyphs: &[(u32, u16, &[u8])],
 ) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -19,16 +18,11 @@ fn make_valid_font(
     buf.push(crate::format::VERSION);
     buf.push(pixel_format as u8);
     buf.extend_from_slice(&height.to_le_bytes());
-    buf.extend_from_slice(&spacing.to_le_bytes());
     buf.extend_from_slice(&(glyphs.len() as u32).to_le_bytes());
 
     // Per-glyph table
     for &(code, width, _) in glyphs {
-        let px_count = width as usize * height as usize;
-        let data_len = match pixel_format {
-            PixelFormat::AntiAliased => px_count,
-            PixelFormat::Monochrome => (px_count + 7) / 8,
-        };
+        let data_len = glyph_data_size(width, height, pixel_format);
         buf.extend_from_slice(&code.to_le_bytes());
         buf.extend_from_slice(&width.to_le_bytes());
         buf.extend_from_slice(&(cursor as u32).to_le_bytes());
@@ -47,16 +41,13 @@ fn make_valid_font(
 #[test]
 fn header_fields_are_little_endian() {
     let height: u16 = 2;
-    let spacing: u16 = 0x0403;
     let data = make_valid_font(
         PixelFormat::AntiAliased,
         height,
-        spacing,
         &[(0x41, 2, &[0u8; 4])], // 2×2 AA = 4 bytes
     );
     let font = Font::new(&data).unwrap();
     assert_eq!(font.header.height, height);
-    assert_eq!(font.header.spacing, spacing);
     assert_eq!(font.header.char_count, 1); // Only 1 glyph
 }
 
@@ -68,5 +59,5 @@ fn invalid_pixel_format_byte_returns_error() {
     data[4] = crate::format::VERSION;
     data[5] = 2; // invalid pixel format
     let result = Font::new(&data);
-    assert!(matches!(result, Err(FontError::UnsupportedVersion(2))));
+    assert!(matches!(result, Err(FontError::InvalidPixelFormat(2))));
 }

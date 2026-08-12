@@ -69,11 +69,12 @@ small { color: #666; }
 </select>
 </div>
 <div>
-<label for="spacing">Spacing</label>
+<label for="spacing">Preview Spacing</label>
+<small>(render-time only, not stored in font)</small>
 <select id="spacing">
+<option value="2" selected>2</option>
 <option value="0">0</option>
 <option value="1">1</option>
-<option value="2">2</option>
 <option value="3">3</option>
 </select>
 </div>
@@ -92,7 +93,7 @@ small { color: #666; }
 </section>
 
 <script type="module">
-import init, { convert_atlas } from './pkg/font_maker_cli.js?v=8';
+import init, { convert_atlas } from './pkg/font_maker_cli.js?v=20';
 
 const fontFile = document.getElementById('font-file');
 const charsInput = document.getElementById('chars');
@@ -217,7 +218,7 @@ async function renderPreview() {
         x2 += charWidths[i] + gap;
     }
 
-    showStatus('Preview rendered: ' + text.length + ' chars, ' + canvas.width + 'x' + canvas.height + ' (spacing=' + spacing + ')', 'ok');
+    showStatus('Preview rendered: ' + text.length + ' chars, ' + canvas.width + 'x' + canvas.height, 'ok');
 
     // Store for export
     window._charWidths = charWidthsPrecise;
@@ -270,14 +271,8 @@ convertBtn.addEventListener('click', async () => {
         console.log('dataLen:', cropData.length, 'expected:', cropW * cropH * 4);
         const bytes = (() => {
             try {
-                console.log('Calling convert_atlas...', {
-                    cropW, cropH, spacing,
-                    cropDataLen: cropData.length,
-                    codePointsLen: codePoints.length,
-                    charWidthsLen: charWidths.length,
-                    charPositionsLen: charPositions.length
-                });
-                const result = convert_atlas(cropData, cropW, cropH, spacing, codePoints, charWidths, charPositions);
+                console.log('Calling convert_atlas...');
+                const result = convert_atlas(cropData, cropW, cropH, codePoints, charWidths, charPositions);
                 console.log('Result length:', result.length);
                 return result;
             } catch (e) {

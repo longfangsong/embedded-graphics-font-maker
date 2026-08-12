@@ -1,9 +1,13 @@
 //! WASM interface for font conversion.
-//!
-//! Browser renders TTF chars to canvas → extracts RGBA pixels → calls this module → downloads .bin
 
 use wasm_bindgen::prelude::*;
-use crate::convert::{CharacterRegion, generate_binary_font};
+use crate::convert::{CharacterRegion, zip_codes, generate_binary_font};
+
+/// Initialize WASM.
+#[wasm_bindgen(start)]
+fn wasm_start() {
+    console_error_panic_hook::set_once();
+}
 
 /// Convert RGBA pixel data (from canvas) to binary font.
 #[wasm_bindgen]
@@ -11,35 +15,40 @@ pub fn convert_atlas(
     pixels: &[u8],
     width: u32,
     height: u32,
-    spacing: u16,
     codepoints: &[u32],
     char_widths: &[u16],
     char_positions: &[u32],
 ) -> Vec<u8> {
-    if codepoints.is_empty() || char_widths.is_empty() || char_positions.is_empty() {
+    // Validate inputs
+    let n = codepoints.len();
+    if n == 0 || char_widths.is_empty() || char_positions.is_empty() {
         return vec![];
     }
-    if codepoints.len() != char_widths.len() || codepoints.len() != char_positions.len() {
+    if char_widths.len() != n || char_positions.len() != n {
         return vec![];
     }
 
-    let mut regions: Vec<CharacterRegion> = Vec::new();
-    for (&x, &rw) in char_positions.iter().zip(char_widths.iter()) {
-        if x + rw as u32 > width {
+    // Build regions
+    let mut regions = Vec::new();
+    for i in 0..n {
+        let x = char_positions[i];
+        let rw = char_widths[i] as u32;
+        if x + rw > width {
             return vec![];
         }
-        regions.push(CharacterRegion { x, width: rw });
+        regions.push(CharacterRegion { x, width: rw as u16 });
     }
 
-    let coded_regions: Vec<(u32, CharacterRegion)> = regions
-        .into_iter()
-        .zip(codepoints.iter())
-        .map(|(region, &code)| (code, region))
-        .collect();
+    let coded_regions = zip_codes(&regions, codepoints);
+    if coded_regions.is_empty() {
+        return vec![];
+    }
 
-    let format = "8bpp";
-    match generate_binary_font(&coded_regions, pixels, width, height, spacing, format) {
+    match generate_binary_font(&coded_regions, pixels, width, height, "8bpp") {
         Ok(b) => b,
-        Err(_) => vec![],
+        Err(e) => {
+            web_sys::console::error_1(&e.into());
+            vec![]
+        }
     }
 }

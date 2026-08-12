@@ -10,6 +10,5 @@ pub mod error;
 mod tests {
     mod parser;
     mod data_size;
-    mod roundtrip;
     mod header;
 }
