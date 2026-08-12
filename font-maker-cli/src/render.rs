@@ -33,8 +33,7 @@ pub fn run_render(
     // Width = sum of all character widths + (num_chars - 1) * spacing
     let text_width: i32 = if text.len() > 0 {
         let widths: i32 = text.chars().map(|ch| {
-            font.glyphs().iter()
-                .find(|g| g.code == ch as u32)
+            font.get_glyph_entry(ch)
                 .map(|g| g.width as i32)
                 .unwrap_or(0)
         }).sum();
@@ -71,8 +70,7 @@ pub fn run_render(
 
     for ch in text.chars() {
         let code = ch as u32;
-        let glyph_width = font.glyphs().iter()
-            .find(|g| g.code == code)
+        let glyph_width = font.get_glyph_entry(ch)
             .map(|g| g.width as i32)
             .unwrap_or(0);
         

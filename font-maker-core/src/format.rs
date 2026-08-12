@@ -56,12 +56,11 @@ pub struct GlyphEntry {
 
 /// A parsed binary font.
 ///
-/// Holds the parsed header, the per-glyph table, and a reference to the
-/// original byte slice so glyph data can be accessed without copying.
+/// Holds the parsed header and a reference to the original byte slice.
+/// Glyph entries are parsed lazily from the glyph table (no Vec allocation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Font<'a> {
     pub header: Header,
-    pub glyphs: Vec<GlyphEntry>,
     data: &'a [u8],
 }
 
@@ -109,16 +108,7 @@ impl<'a> Font<'a> {
             char_count,
         };
 
-        // 5. Empty font — nothing more to validate.
-        if char_count == 0 {
-            return Ok(Font {
-                header,
-                glyphs: Vec::new(),
-                data,
-            });
-        }
-
-        // 6. Per-glyph table must fit after the header.
+        // 5. Per-glyph table must fit after the header.
         let table_end = HEADER_SIZE
             .checked_add(GLYPH_ENTRY_SIZE * char_count as usize)
             .ok_or(FontError::TruncatedFile)?;
@@ -126,16 +116,9 @@ impl<'a> Font<'a> {
             return Err(FontError::TruncatedFile);
         }
 
-        // 7. Parse each glyph entry and validate data regions.
-        let mut glyphs = Vec::with_capacity(char_count as usize);
+        // 6. Validate each glyph entry and its data region (lazy parse, no Vec).
         for i in 0..char_count {
             let base = HEADER_SIZE + (i as usize) * GLYPH_ENTRY_SIZE;
-            let code = u32::from_le_bytes([
-                data[base],
-                data[base + 1],
-                data[base + 2],
-                data[base + 3],
-            ]);
             let width = u16::from_le_bytes([data[base + 4], data[base + 5]]);
             let data_offset = u32::from_le_bytes([
                 data[base + 6],
@@ -144,7 +127,6 @@ impl<'a> Font<'a> {
                 data[base + 9],
             ]);
 
-            // data_offset must point within the file.
             let offset = data_offset as usize;
             if offset > data.len() {
                 return Err(FontError::InvalidDataOffset {
@@ -153,51 +135,71 @@ impl<'a> Font<'a> {
                 });
             }
 
-            // Data size for this glyph.
             let px_count = width as usize * height as usize;
             let data_size = match pixel_format {
                 PixelFormat::AntiAliased => px_count,
                 PixelFormat::Monochrome => (px_count + 7) / 8,
             };
 
-            // Glyph data must fit within the file.
             if offset + data_size > data.len() {
                 return Err(FontError::TruncatedGlyphData {
                     offset: data_offset,
                     required: data_size,
                 });
             }
-
-            glyphs.push(GlyphEntry {
-                code,
-                width,
-                data_offset,
-            });
         }
 
-        Ok(Font {
-            header,
-            glyphs,
-            data,
-        })
+        Ok(Font { header, data })
     }
 
-    /// Return a slice pointing to the raw glyph data for the given code point.
+    /// Parse a single glyph entry from the glyph table by index.
+    fn glyph_entry_at(&self, index: usize) -> Option<GlyphEntry> {
+        if index >= self.header.char_count as usize {
+            return None;
+        }
+        let base = HEADER_SIZE + index * GLYPH_ENTRY_SIZE;
+        if base + GLYPH_ENTRY_SIZE > self.data.len() {
+            return None;
+        }
+        let code = u32::from_le_bytes([
+            self.data[base],
+            self.data[base + 1],
+            self.data[base + 2],
+            self.data[base + 3],
+        ]);
+        let width = u16::from_le_bytes([self.data[base + 4], self.data[base + 5]]);
+        let data_offset = u32::from_le_bytes([
+            self.data[base + 6],
+            self.data[base + 7],
+            self.data[base + 8],
+            self.data[base + 9],
+        ]);
+        Some(GlyphEntry { code, width, data_offset })
+    }
+
+    /// Return the glyph entry for the given code point (linear scan of glyph table).
     ///
     /// Returns `None` if the character is not in the font.
-    pub fn glyph_data(&self, code: u32) -> Option<&[u8]> {
-        self.glyphs
-            .iter()
-            .find(|g| g.code == code)
-            .map(|g| {
-                let off = g.data_offset as usize;
-                let px_count = g.width as usize * self.header.height as usize;
-                let len = match self.header.pixel_format {
-                    PixelFormat::AntiAliased => px_count,
-                    PixelFormat::Monochrome => (px_count + 7) / 8,
-                };
-                &self.data[off..off + len]
-            })
+    pub fn get_glyph_entry(&self, code: u32) -> Option<GlyphEntry> {
+        for i in 0..self.header.char_count as usize {
+            if let Some(entry) = self.glyph_entry_at(i) {
+                if entry.code == code {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    /// Return a slice pointing to the raw glyph data for the given entry.
+    pub fn glyph_data(&self, entry: &GlyphEntry) -> &[u8] {
+        let off = entry.data_offset as usize;
+        let px_count = entry.width as usize * self.header.height as usize;
+        let len = match self.header.pixel_format {
+            PixelFormat::AntiAliased => px_count,
+            PixelFormat::Monochrome => (px_count + 7) / 8,
+        };
+        &self.data[off..off + len]
     }
 
     /// Serialize this font back to a byte vector.
@@ -215,37 +217,48 @@ impl<'a> Font<'a> {
         buf.extend_from_slice(&self.header.spacing.to_le_bytes());
         buf.extend_from_slice(&self.header.char_count.to_le_bytes());
 
-        // Per-glyph table.
-        let mut data_cursor = HEADER_SIZE + GLYPH_ENTRY_SIZE * self.glyphs.len();
-        for entry in &self.glyphs {
-            buf.extend_from_slice(&entry.code.to_le_bytes());
-            buf.extend_from_slice(&entry.width.to_le_bytes());
-            buf.extend_from_slice(&(data_cursor as u32).to_le_bytes());
-            let px_count = entry.width as usize * self.header.height as usize;
-            let data_len = match self.header.pixel_format {
-                PixelFormat::AntiAliased => px_count,
-                PixelFormat::Monochrome => (px_count + 7) / 8,
-            };
-            data_cursor += data_len;
+        // Per-glyph table — lazy parse each entry.
+        let char_count = self.header.char_count as usize;
+        let mut data_cursor = HEADER_SIZE + GLYPH_ENTRY_SIZE * char_count;
+        for i in 0..char_count {
+            if let Some(entry) = self.glyph_entry_at(i) {
+                buf.extend_from_slice(&entry.code.to_le_bytes());
+                buf.extend_from_slice(&entry.width.to_le_bytes());
+                buf.extend_from_slice(&(data_cursor as u32).to_le_bytes());
+                let px_count = entry.width as usize * self.header.height as usize;
+                let data_len = match self.header.pixel_format {
+                    PixelFormat::AntiAliased => px_count,
+                    PixelFormat::Monochrome => (px_count + 7) / 8,
+                };
+                data_cursor += data_len;
+            }
         }
 
         // Glyph data — pull from the original bytes.
-        for entry in &self.glyphs {
-            let off = entry.data_offset as usize;
-            let px_count = entry.width as usize * self.header.height as usize;
-            let len = match self.header.pixel_format {
-                PixelFormat::AntiAliased => px_count,
-                PixelFormat::Monochrome => (px_count + 7) / 8,
-            };
-            buf.extend_from_slice(&self.data[off..off + len]);
+        for i in 0..char_count {
+            if let Some(entry) = self.glyph_entry_at(i) {
+                let off = entry.data_offset as usize;
+                let px_count = entry.width as usize * self.header.height as usize;
+                let len = match self.header.pixel_format {
+                    PixelFormat::AntiAliased => px_count,
+                    PixelFormat::Monochrome => (px_count + 7) / 8,
+                };
+                buf.extend_from_slice(&self.data[off..off + len]);
+            }
         }
 
         buf
     }
 
     fn serialized_size(&self) -> usize {
-        let table_size = GLYPH_ENTRY_SIZE * self.glyphs.len();
-        let data_size: usize = self.glyphs.iter().map(|g| glyph_data_size(g, &self.header)).sum();
+        let char_count = self.header.char_count as usize;
+        let table_size = GLYPH_ENTRY_SIZE * char_count;
+        let mut data_size = 0usize;
+        for i in 0..char_count {
+            if let Some(g) = self.glyph_entry_at(i) {
+                data_size += glyph_data_size(&g, &self.header);
+            }
+        }
         HEADER_SIZE + table_size + data_size
     }
 }

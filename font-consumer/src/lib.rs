@@ -1,12 +1,11 @@
 #![no_std]
-extern crate alloc;
-
-use alloc::vec::Vec;
 
 fn blend_channel(bg: u8, fg: u8, alpha: u8) -> u8 {
     let a = alpha as u16;
     ((bg as u16 * (255 - a) + fg as u16 * a) / 255) as u8
 }
+
+use core::marker::PhantomData;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
@@ -21,6 +20,69 @@ use embedded_graphics::{
 };
 use font_maker_core::format::{Font as CoreFont, GlyphEntry, Header, PixelFormat};
 use font_maker_core::error::FontError;
+
+/// Zero-alloc iterator over pixels of a single glyph.
+struct GlyphPixelIter<'a, C> {
+    data: &'a [u8],
+    width: usize,
+    height: usize,
+    pos: Point,
+    fg8: Rgb888,
+    bg8: Rgb888,
+    fmt: PixelFormat,
+    idx: usize,
+    _marker: PhantomData<C>,
+}
+
+impl<'a, C: PixelColor + From<Rgb888>> Iterator for GlyphPixelIter<'a, C> {
+    type Item = Pixel<C>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.fmt {
+            PixelFormat::AntiAliased => {
+                while self.idx < self.data.len() {
+                    let alpha = self.data[self.idx];
+                    let px = (self.idx % self.width) as i32;
+                    let py = (self.idx / self.width) as i32;
+                    self.idx += 1;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let blended8 = Rgb888::new(
+                        blend_channel(self.bg8.r(), self.fg8.r(), alpha),
+                        blend_channel(self.bg8.g(), self.fg8.g(), alpha),
+                        blend_channel(self.bg8.b(), self.fg8.b(), alpha),
+                    );
+                    return Some(Pixel(
+                        Point::new(self.pos.x + px, self.pos.y + py),
+                        C::from(blended8),
+                    ));
+                }
+            }
+            PixelFormat::Monochrome => {
+                while self.idx < self.width * self.height {
+                    let bit_idx = self.idx;
+                    let byte_idx = bit_idx / 8;
+                    let bit = 7 - (bit_idx % 8);
+                    self.idx += 1;
+                    if byte_idx >= self.data.len() {
+                        break;
+                    }
+                    let fg = (self.data[byte_idx] >> bit) & 1 != 0;
+                    if fg {
+                        let px = (bit_idx % self.width) as i32;
+                        let py = (bit_idx / self.width) as i32;
+                        return Some(Pixel(
+                            Point::new(self.pos.x + px, self.pos.y + py),
+                            self.fg8.into(),
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
 
 /// Character bounds in a text layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,60 +138,23 @@ impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
         D: DrawTarget<Color = C>,
     {
         let glyph = self.font.get_glyph_entry(c).expect("glyph not found");
-        let data = self.font.glyph_data(glyph);
+        let data = self.font.glyph_data(&glyph);
         let width = glyph.width as usize;
         let height = self.font.header().height as usize;
+        let fg8: Rgb888 = self.text_color.into();
+        let bg8: Rgb888 = self.background_color.map(Into::into).unwrap_or(Rgb888::BLACK);
 
-        let mut pixels = Vec::new();
-
-        match self.font.pixel_format() {
-            PixelFormat::AntiAliased => {
-                let fg8: Rgb888 = self.text_color.into();
-                let bg8: Rgb888 = self.background_color.map(Into::into).unwrap_or(Rgb888::BLACK);
-                for y in 0..height {
-                    for x in 0..width {
-                        let idx = y * width + x;
-                        if idx >= data.len() {
-                            break;
-                        }
-                        let alpha = data[idx];
-                        if alpha > 0 {
-                            let blended8 = Rgb888::new(
-                                blend_channel(bg8.r(), fg8.r(), alpha),
-                                blend_channel(bg8.g(), fg8.g(), alpha),
-                                blend_channel(bg8.b(), fg8.b(), alpha),
-                            );
-                            pixels.push(Pixel(
-                                (pos.x + x as i32, pos.y + y as i32).into(),
-                                C::from(blended8),
-                            ));
-                        }
-                    }
-                }
-            }
-            PixelFormat::Monochrome => {
-                for y in 0..height {
-                    for x in 0..width {
-                        let bit_idx = y * width + x;
-                        let byte_idx = bit_idx / 8;
-                        let bit = 7 - (bit_idx % 8);
-                        if byte_idx < data.len() {
-                            let fg = (data[byte_idx] >> bit) & 1 != 0;
-                            if fg {
-                                pixels.push(Pixel(
-                                    (pos.x + x as i32, pos.y + y as i32).into(),
-                                    self.text_color,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if !pixels.is_empty() {
-            target.draw_iter(pixels.into_iter())?;
-        }
+        target.draw_iter(GlyphPixelIter {
+            data,
+            width,
+            height,
+            pos,
+            fg8,
+            bg8,
+            fmt: self.font.pixel_format(),
+            idx: 0,
+            _marker: PhantomData,
+        })?;
 
         Ok(glyph.width as u32)
     }
@@ -229,19 +254,19 @@ impl<'a> Font<'a> {
         &self.inner.header
     }
 
-    /// Access the parsed glyph entries.
-    pub fn glyphs(&self) -> &[GlyphEntry] {
-        &self.inner.glyphs
-    }
-
     /// Return the pixel format of this font.
     pub fn pixel_format(&self) -> PixelFormat {
         self.inner.header.pixel_format
     }
 
+    /// Return the glyph entry for a character (lazy parse).
+    pub fn get_glyph_entry(&self, c: char) -> Option<GlyphEntry> {
+        self.inner.get_glyph_entry(c as u32)
+    }
+
     /// Return the bounds of a character if it exists in this font.
     pub fn character_bounds(&self, c: char) -> Option<CharacterBounds> {
-        self.inner.glyphs.iter().find(|g| g.code == c as u32).map(|g| CharacterBounds {
+        self.inner.get_glyph_entry(c as u32).map(|g| CharacterBounds {
             width: g.width,
             height: self.inner.header.height,
         })
@@ -249,18 +274,14 @@ impl<'a> Font<'a> {
 
     /// Return a slice pointing to the raw glyph data for the given entry.
     pub fn glyph_data(&self, entry: &GlyphEntry) -> &[u8] {
-        self.inner.glyph_data(entry.code).unwrap_or(&[])
+        self.inner.glyph_data(entry)
     }
 
     /// Return glyph data by code point.
     pub fn glyph_data_by_code(&self, code: u32) -> Option<&[u8]> {
-        self.inner.glyph_data(code)
+        self.inner.get_glyph_entry(code).map(|e| self.inner.glyph_data(&e))
     }
 
-    /// Lookup a glyph entry by character.
-    pub fn get_glyph_entry(&self, c: char) -> Option<&GlyphEntry> {
-        self.inner.glyphs.iter().find(|g| g.code == c as u32)
-    }
 }
 
 #[cfg(test)]
@@ -329,7 +350,7 @@ mod tests {
         let data = make_test_font_data();
         let font = Font::new(&data).unwrap();
         let entry = font.get_glyph_entry('A').unwrap();
-        let pixel_data = font.glyph_data(entry);
+        let pixel_data = font.glyph_data(&entry);
         assert_eq!(pixel_data.len(), 50); // 5x10 AA
         assert!(pixel_data.iter().all(|&v| v == 255));
     }
