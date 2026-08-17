@@ -37,6 +37,11 @@ enum Commands {
         /// Pixel format: 8bpp or 1bpp (default: 8bpp)
         #[arg(long, default_value = "8bpp")]
         format: String,
+
+        /// Rows from the top of the atlas down to the alphabetic baseline.
+        /// Defaults to the atlas height (baseline at the bottom of the glyph box).
+        #[arg(long)]
+        baseline: Option<u16>,
     },
 
     /// Render a test string from a binary font to a preview PNG
@@ -89,8 +94,16 @@ fn main() {
             start_code,
             chars,
             format,
+            baseline,
         } => {
-            if let Err(e) = run_convert(&input, &output, start_code, chars.as_deref(), &format) {
+            if let Err(e) = run_convert(
+                &input,
+                &output,
+                start_code,
+                chars.as_deref(),
+                &format,
+                baseline,
+            ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -120,6 +133,7 @@ fn run_convert(
     start_code: u32,
     chars: Option<&str>,
     format: &str,
+    baseline: Option<u16>,
 ) -> Result<(), String> {
     // Read PNG file.
     let mut file =
@@ -177,8 +191,14 @@ fn run_convert(
         convert::assign_codes(&regions, start_code)
     };
 
+    // A PNG atlas carries no font metrics, so the baseline has to be told to us;
+    // without it, assume the atlas was cropped to the baseline.
+    let baseline = baseline.unwrap_or(height as u16);
+    println!("Baseline: {} (of {} rows)", baseline, height);
+
     // Generate binary font.
-    let font_bytes = convert::generate_binary_font(&coded_regions, &buffer, width, height, format)?;
+    let font_bytes =
+        convert::generate_binary_font(&coded_regions, &buffer, width, height, baseline, format)?;
 
     // Write output file.
     fs::write(output_path, &font_bytes)

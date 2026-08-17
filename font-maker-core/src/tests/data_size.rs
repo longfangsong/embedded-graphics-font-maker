@@ -18,6 +18,7 @@ fn make_valid_font(
     buf.push(pixel_format as u8);
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&(glyphs.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&height.to_le_bytes()); // baseline: box bottom
 
     // Per-glyph table
     for &(code, width, _) in glyphs {

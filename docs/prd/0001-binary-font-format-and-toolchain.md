@@ -62,6 +62,51 @@
 
 **Layout**: Header → Per-glyph table (char_count entries) → Glyph data (sequential, in same order as table).
 
+### Binary Font Format v2
+
+v2 appends one field to the header. Everything after the header — the per-glyph
+table and the glyph data — is unchanged.
+
+**Header** (14 bytes total):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| magic | `[u8; 4]` | `"EFM1"` — identifies the format |
+| version | `u8` | `2` — format version |
+| pixel_format | `u8` | `0` = monochrome (1bpp), `1` = anti-aliased (8bpp) |
+| height | `u16` | Uniform glyph height (all glyphs share this) |
+| char_count | `u32` | Number of glyphs |
+| baseline | `u16` | Rows from the top of the glyph box down to the alphabetic baseline; `<= height` |
+
+- The baseline is font-level metadata, not per-glyph: every glyph shares the
+  same box, so they share the same baseline row.
+- It is fixed at generation time. The web tool knows it exactly — it is the
+  canvas `fillText` y used with `textBaseline = 'alphabetic'`. The CLI takes it
+  via `--baseline`, defaulting to `height`, i.e. assuming the PNG atlas was
+  cropped so that the baseline is the last row.
+
+### Glyph Box (web tool)
+
+The glyph box is derived from the font, not from the requested pixel size:
+
+1. Render on a canvas sized from the font's own metrics —
+   `ceil(fontBoundingBoxAscent) + ceil(fontBoundingBoxDescent)` plus 1px of
+   padding on each side for anti-aliasing spill. Sizing it from the nominal
+   pixel size instead would clip: PingFang declares a 1.06em ascent, so at 18px
+   its tall punctuation (`( ) [ | ~`) overflows an 18-row box by 2 rows.
+2. Scan the rendered atlas for the rows that contain ink, across *all* selected
+   characters — every glyph shares one box, so the box is their union.
+3. Crop to those rows: `height = bottom - top + 1`, `baseline = baselineY - top`.
+
+So `height` is a measured output, not the pixel size the user typed, and two
+fonts cut from the same TTF at the same size can differ in height if their
+character sets differ. Blank rows are never stored: a digits-only PingFang at
+48px comes out 37 rows instead of 48 (−21% of the file) with an identical
+rendering.
+- Readers still accept v1 files: those have a 12-byte header and no baseline,
+  so the parser reports `baseline == height` for them, matching the CLI
+  default. Writers always emit v2.
+
 ### Pixel Format
 
 - The `pixel_format` field in the header selects the encoding.

@@ -10,6 +10,9 @@ fn wasm_start() {
 }
 
 /// Convert RGBA pixel data (from canvas) to binary font.
+///
+/// `baseline` is the canvas row the glyphs were drawn on (`ctx.fillText` y with
+/// `textBaseline = 'alphabetic'`), counted from the top of the atlas.
 #[wasm_bindgen]
 pub fn convert_atlas(
     pixels: &[u8],
@@ -18,6 +21,7 @@ pub fn convert_atlas(
     codepoints: &[u32],
     char_widths: &[u16],
     char_positions: &[u32],
+    baseline: u16,
 ) -> Vec<u8> {
     // Validate inputs
     let n = codepoints.len();
@@ -44,7 +48,7 @@ pub fn convert_atlas(
         return vec![];
     }
 
-    match generate_binary_font(&coded_regions, pixels, width, height, "8bpp") {
+    match generate_binary_font(&coded_regions, pixels, width, height, baseline, "8bpp") {
         Ok(b) => b,
         Err(e) => {
             web_sys::console::error_1(&e.into());

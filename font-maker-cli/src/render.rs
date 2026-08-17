@@ -24,8 +24,8 @@ pub fn run_render(
     let font = font_maker_core::format::Font::new(&font_data)
         .map_err(|e| format!("Failed to parse font: {:?}", e))?;
 
-    eprintln!("Font loaded: {} characters, height={}",
-        font.header.char_count, font.header.height);
+    eprintln!("Font loaded: v{}, {} characters, height={}, baseline={}",
+        font.header.version, font.header.char_count, font.header.height, font.header.baseline);
 
     let bg = Rgb888::new(
         ((bg_color >> 16) & 0xFF) as u8,
@@ -93,6 +93,7 @@ mod tests {
             &pixels,
             width,
             height,
+            height as u16,
             "8bpp",
         )
         .unwrap();

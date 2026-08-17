@@ -19,6 +19,7 @@ fn make_valid_font(
     buf.push(pixel_format as u8);
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(&(glyphs.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&height.to_le_bytes()); // baseline: box bottom
 
     // Per-glyph table
     for &(code, width, _) in glyphs {
@@ -56,7 +57,7 @@ fn empty_file_returns_truncated() {
 
 #[test]
 fn truncated_header_returns_truncated() {
-    let result = Font::new(&[0u8; 11]); // Less than HEADER_SIZE (12)
+    let result = Font::new(&[0u8; 11]); // Less than the smallest header (v1, 12 bytes)
     assert_eq!(result, Err(FontError::TruncatedFile));
 }
 
@@ -74,6 +75,15 @@ fn unsupported_version_returns_error() {
     data[4] = 99; // unsupported version
     let result = Font::new(&data);
     assert_eq!(result, Err(FontError::UnsupportedVersion(99)));
+}
+
+#[test]
+fn version_newer_than_current_returns_error() {
+    let mut data = [0u8; 24];
+    data[0..4].copy_from_slice(&MAGIC);
+    data[4] = VERSION + 1;
+    let result = Font::new(&data);
+    assert_eq!(result, Err(FontError::UnsupportedVersion(VERSION + 1)));
 }
 
 #[test]
@@ -98,8 +108,8 @@ fn valid_font_with_glyphs_parses() {
     let entry = font.get_glyph_entry(0x41).unwrap();
     assert_eq!(entry.code, 0x41);
     assert_eq!(entry.width, 4);
-    assert_eq!(entry.data_offset, 22); // 12 header + 10 table
-    assert_eq!(entry.data_offset, data[18..22].read_le_u32());
+    assert_eq!(entry.data_offset, 24); // 14 header + 10 table
+    assert_eq!(entry.data_offset, data[20..24].read_le_u32());
 }
 
 #[test]
@@ -110,7 +120,7 @@ fn truncated_glyph_data_returns_error() {
         &[(0x41, 4, &[0x80u8; 16])],
     );
     // Shrink the file so the glyph data doesn't fit.
-    data.truncate(33); // table ends at 22, data needs 16 bytes but only 11 available
+    data.truncate(33); // table ends at 24, data needs 16 bytes but only 9 available
     let result = Font::new(&data);
     assert!(matches!(result, Err(FontError::TruncatedGlyphData { .. })));
 }
@@ -122,15 +132,15 @@ fn invalid_data_offset_returns_error() {
         4,
         &[(0x41, 4, &[0x80u8; 16])],
     );
-    // Verify initial state: header(12) + table(10) + data(16) = 38
-    assert_eq!(data.len(), 38);
+    // Verify initial state: header(14) + table(10) + data(16) = 40
+    assert_eq!(data.len(), 40);
     // Glyph entry layout: code (4) + width (2) + data_offset (4) = 10 bytes
-    // code: [12..15], width: [16..17], data_offset: [18..21]
-    assert_eq!(data[18..22], [22, 0, 0, 0]); // data_offset should be 22
-    
-    // data_offset is at bytes 18-21. Set it to a huge value.
-    data[18..22].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
-    assert_eq!(&data[18..22], &0xDEAD_BEEF_u32.to_le_bytes());
+    // code: [14..17], width: [18..19], data_offset: [20..23]
+    assert_eq!(data[20..24], [24, 0, 0, 0]); // data_offset should be 24
+
+    // data_offset is at bytes 20-23. Set it to a huge value.
+    data[20..24].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+    assert_eq!(&data[20..24], &0xDEAD_BEEF_u32.to_le_bytes());
     
     let result = Font::new(&data);
     // This should fail because data_offset is huge
@@ -151,10 +161,10 @@ fn multiple_glyphs_parse_correctly() {
     let entry_b = font.get_glyph_entry(0x42).unwrap();
     assert_eq!(entry_a.code, 0x41);
     assert_eq!(entry_a.width, 4);
-    assert_eq!(entry_a.data_offset, 32); // 12 header + 2×10 table
+    assert_eq!(entry_a.data_offset, 34); // 14 header + 2×10 table
     assert_eq!(entry_b.code, 0x42);
     assert_eq!(entry_b.width, 6);
-    assert_eq!(entry_b.data_offset, 48); // 32 + 16
+    assert_eq!(entry_b.data_offset, 50); // 34 + 16
 }
 
 #[test]

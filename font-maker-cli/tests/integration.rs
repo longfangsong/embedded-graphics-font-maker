@@ -40,6 +40,7 @@ fn convert_png_to_binary() {
         &pixels,
         width,
         height,
+        8,
         "8bpp",
     )
     .unwrap();
@@ -52,6 +53,7 @@ fn convert_png_to_binary() {
     let hdr = &font.header;
     assert_eq!(hdr.char_count, 2);
     assert_eq!(hdr.height, 10);
+    assert_eq!(hdr.baseline, 8);
     assert_eq!(hdr.pixel_format, font_maker_core::format::PixelFormat::AntiAliased);
 
     // Verify glyphs.
@@ -95,6 +97,7 @@ fn convert_mono_format() {
         &pixels,
         width,
         height,
+        height as u16,
         "1bpp",
     )
     .unwrap();
@@ -132,6 +135,7 @@ fn render_creates_png() {
         &pixels,
         width,
         height,
+        height as u16,
         "8bpp",
     )
     .unwrap();

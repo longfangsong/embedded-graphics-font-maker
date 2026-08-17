@@ -1,5 +1,7 @@
 use std::vec::Vec;
-use font_maker_core::format::{GlyphEntry, MAGIC, VERSION, PixelFormat, HEADER_SIZE, GLYPH_ENTRY_SIZE};
+use font_maker_core::format::{
+    GlyphEntry, GLYPH_ENTRY_SIZE, HEADER_SIZE, MAGIC, PixelFormat, VERSION,
+};
 
 /// A detected character region in the PNG atlas.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +109,8 @@ pub fn assign_codes(regions: &[CharacterRegion], start_code: u32) -> Vec<(u32, C
 /// * `pixels` - RGBA pixel data
 /// * `width` - Image width in pixels
 /// * `height` - Image height in pixels
+/// * `baseline` - Rows from the top of the glyph box down to the alphabetic
+///   baseline; must be `<= height`
 /// * `pixel_format` - "8bpp" or "1bpp"
 ///
 /// # Returns
@@ -116,6 +120,7 @@ pub fn generate_binary_font(
     pixels: &[u8],
     width: u32,
     height: u32,
+    baseline: u16,
     pixel_format: &str,
 ) -> Result<Vec<u8>, String> {
 
@@ -126,6 +131,13 @@ pub fn generate_binary_font(
     };
 
     let h = height as u16;
+
+    if baseline > h {
+        return Err(format!(
+            "Baseline {} is below the glyph box (height {})",
+            baseline, h
+        ));
+    }
 
     // Validate pixel data length
     let expected_len = (width as usize) * (height as usize) * 4;
@@ -177,6 +189,7 @@ pub fn generate_binary_font(
     buf.push(pf as u8);
     buf.extend_from_slice(&h.to_le_bytes());
     buf.extend_from_slice(&(coded_regions.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&baseline.to_le_bytes());
 
     for entry in &glyphs {
         buf.extend_from_slice(&entry.code.to_le_bytes());
@@ -358,20 +371,59 @@ mod tests {
         assert_eq!(regions.len(), 1);
 
         let coded = assign_codes(&regions, 0x41);
-        let font_bytes = generate_binary_font(&coded, &pixels, 10, 4, "8bpp");
+        let font_bytes = generate_binary_font(&coded, &pixels, 10, 4, 3, "8bpp");
         assert!(font_bytes.is_ok());
 
         let bytes = font_bytes.unwrap();
         // Verify magic
         assert_eq!(&bytes[0..4], b"EFM1");
         // Verify version
-        assert_eq!(bytes[4], 1);
+        assert_eq!(bytes[4], VERSION);
         // Verify pixel format (1 = AA)
         assert_eq!(bytes[5], 1);
         // Verify height (4)
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 4);
         // Verify char_count (1)
         assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 1);
+        // Verify baseline (3)
+        assert_eq!(u16::from_le_bytes([bytes[12], bytes[13]]), 3);
+    }
+
+    #[test]
+    fn generated_font_roundtrips_baseline() {
+        // 10x8 image, one solid character at x=2..6
+        let mut pixels = vec![0u8; 10 * 8 * 4];
+        for y in 0..8 {
+            for x in 2..6 {
+                let idx = ((y * 10 + x) * 4) as usize;
+                pixels[idx + 3] = 255;
+            }
+        }
+
+        let regions = detect_character_regions(&pixels, 10, 8);
+        let coded = assign_codes(&regions, 0x41);
+        let bytes = generate_binary_font(&coded, &pixels, 10, 8, 6, "8bpp").unwrap();
+
+        let font = font_maker_core::format::Font::new(&bytes).unwrap();
+        assert_eq!(font.header.version, VERSION);
+        assert_eq!(font.header.height, 8);
+        assert_eq!(font.header.baseline, 6);
+        // Glyph data still lands where the (now 14-byte) header + table end.
+        let entry = font.get_glyph_entry(0x41).unwrap();
+        assert_eq!(
+            entry.data_offset as usize,
+            HEADER_SIZE + GLYPH_ENTRY_SIZE
+        );
+        assert_eq!(font.glyph_data(&entry).len(), 4 * 8);
+    }
+
+    #[test]
+    fn baseline_below_glyph_box_returns_error() {
+        let pixels = vec![255u8; 4 * 4 * 4];
+        let regions = detect_character_regions(&pixels, 4, 4);
+        let coded = assign_codes(&regions, 0x41);
+        let result = generate_binary_font(&coded, &pixels, 4, 4, 5, "8bpp");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -387,7 +439,7 @@ mod tests {
 
         let regions = detect_character_regions(&pixels, 8, 8);
         let coded = assign_codes(&regions, 0x41);
-        let font_bytes = generate_binary_font(&coded, &pixels, 8, 8, "1bpp");
+        let font_bytes = generate_binary_font(&coded, &pixels, 8, 8, 8, "1bpp");
         assert!(font_bytes.is_ok());
 
         let bytes = font_bytes.unwrap();
@@ -400,7 +452,7 @@ mod tests {
     #[test]
     fn invalid_pixel_format_returns_error() {
         let regions: Vec<(u32, CharacterRegion)> = vec![];
-        let result = generate_binary_font(&regions, &[], 0, 0, "invalid");
+        let result = generate_binary_font(&regions, &[], 0, 0, 0, "invalid");
         assert!(result.is_err());
     }
 }

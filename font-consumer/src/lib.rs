@@ -1,11 +1,6 @@
 #![no_std]
 extern crate alloc;
 
-fn blend_channel(bg: u8, fg: u8, alpha: u8) -> u8 {
-    let a = alpha as u16;
-    ((bg as u16 * (255 - a) + fg as u16 * a) / 255) as u8
-}
-
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{Point, Size},
@@ -18,8 +13,11 @@ use embedded_graphics::{
     Pixel,
 };
 use font_maker_core::format::{Font as CoreFont, GlyphEntry, PixelFormat};
-use font_maker_core::error::FontError;
 
+fn blend_channel(bg: u8, fg: u8, alpha: u8) -> u8 {
+    let a = alpha as u16;
+    ((bg as u16 * (255 - a) + fg as u16 * a) / 255) as u8
+}
 /// Zero-alloc iterator over pixels of a single glyph.
 struct GlyphPixelIter<'a, C> {
     data: &'a [u8],
@@ -131,13 +129,31 @@ impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
         self
     }
 
-    /// Draw a single character at the given position.
-    fn draw_char<D>(&self, c: char, pos: Point, target: &mut D) -> Result<u32, D::Error>
+    /// Vertical offset from the text's line position down to the top edge of
+    /// the glyph box.
+    ///
+    /// Mirrors `MonoTextStyle`'s own offsets so that text drawn with this style
+    /// lines up with embedded-graphics' built-in fonts: the named position is a
+    /// pixel row, not an edge, so `Bottom` is the last row rather than one past
+    /// it, and `Alphabetic` is the row a non-descending glyph's ink ends on.
+    fn baseline_offset(&self, baseline: Baseline) -> i32 {
+        let height = self.font.header.height as i32;
+        match baseline {
+            Baseline::Top => 0,
+            Baseline::Bottom => (height - 1).max(0),
+            Baseline::Middle => (height - 1).max(0) / 2,
+            // `header.baseline` counts the rows *above* the baseline, so the
+            // row sitting on it is the one before.
+            Baseline::Alphabetic => (self.font.header.baseline as i32 - 1).max(0),
+        }
+    }
+
+    /// Draw a single glyph at the given position.
+    fn draw_glyph<D>(&self, glyph: &GlyphEntry, pos: Point, target: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = C>,
     {
-        let glyph = self.font.get_glyph_entry(c as u32).expect("glyph not found");
-        let data = self.font.glyph_data(&glyph);
+        let data = self.font.glyph_data(glyph);
         let width = glyph.width as usize;
         let height = self.font.header.height as usize;
         let fg8: Rgb888 = self.text_color.into();
@@ -153,9 +169,7 @@ impl<'a, C: PixelColor + From<Rgb888> + Into<Rgb888>> FontTextStyle<'a, C> {
             fmt: self.font.header.pixel_format,
             idx: 0,
             _marker: core::marker::PhantomData,
-        })?;
-
-        Ok(glyph.width as u32)
+        })
     }
 }
 
@@ -172,20 +186,13 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
     where
         D: DrawTarget<Color = Self::Color>,
     {
-        let height = self.font.header.height as i32;
-        let y_offset = match baseline {
-            Baseline::Top => 0,
-            Baseline::Alphabetic => 0,
-            Baseline::Middle => -(height / 2),
-            Baseline::Bottom => -height,
-        };
         let mut x = position.x;
-        let y = position.y + y_offset;
+        let y = position.y - self.baseline_offset(baseline);
         let spacing = self.char_spacing.unwrap_or(2) as i32;
 
         for c in text.chars() {
             if let Some(entry) = self.font.get_glyph_entry(c as u32) {
-                self.draw_char(c, Point::new(x, y), target)?;
+                self.draw_glyph(&entry, Point::new(x, y), target)?;
                 x += entry.width as i32 + spacing;
             }
         }
@@ -206,7 +213,7 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
         Ok(Point::new(position.x + width as i32, position.y))
     }
 
-    fn measure_string(&self, text: &str, position: Point, _baseline: Baseline) -> TextMetrics {
+    fn measure_string(&self, text: &str, position: Point, baseline: Baseline) -> TextMetrics {
         let mut width: u32 = 0;
         let spacing = self.char_spacing.unwrap_or(2);
 
@@ -220,7 +227,8 @@ impl<C: PixelColor + From<Rgb888> + Into<Rgb888>> TextRenderer for FontTextStyle
         }
 
         let height = self.font.header.height as u32;
-        let bb = Rectangle::new(position, Size::new(width, height));
+        let bb_position = position - Point::new(0, self.baseline_offset(baseline));
+        let bb = Rectangle::new(bb_position, Size::new(width, height));
         let next_pos = Point::new(position.x + width as i32, position.y);
 
         TextMetrics {
@@ -241,17 +249,19 @@ mod tests {
     use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+    use font_maker_core::error::FontError;
     use font_maker_core::format::{MAGIC, VERSION, HEADER_SIZE, GLYPH_ENTRY_SIZE};
 
     /// Build a minimal valid AA font with one glyph (code=65 'A', width=5, height=10).
     fn make_test_font_data() -> Vec<u8> {
         let mut buf = Vec::new();
-        // Header (12 bytes)
+        // Header (14 bytes)
         buf.extend_from_slice(&MAGIC);                    // 0..4
         buf.push(VERSION);                                // 4
         buf.push(PixelFormat::AntiAliased as u8);        // 5
         buf.extend_from_slice(&10u16.to_le_bytes());     // 6..7 height
         buf.extend_from_slice(&1u32.to_le_bytes());      // 8..11 char_count
+        buf.extend_from_slice(&8u16.to_le_bytes());      // 12..13 baseline
         // Glyph entry (10 bytes)
         buf.extend_from_slice(&65u32.to_le_bytes());     // code
         buf.extend_from_slice(&5u16.to_le_bytes());      // width
@@ -291,6 +301,14 @@ mod tests {
     }
 
     #[test]
+    fn baseline_is_available_to_the_renderer() {
+        let data = make_test_font_data();
+        let font = CoreFont::new(&data).unwrap();
+        assert_eq!(font.header.baseline, 8);
+        assert_eq!(font.header.height, 10);
+    }
+
+    #[test]
     fn character_bounds_unknown_code() {
         let data = make_test_font_data();
         let font = CoreFont::new(&data).unwrap();
@@ -324,12 +342,13 @@ mod text_renderer_tests {
     fn make_two_char_font() -> Vec<u8> {
         // A (code=65) at x=0..5, B (code=66) at x=7..12
         let mut buf = Vec::new();
-        // Header (12 bytes)
+        // Header (14 bytes)
         buf.extend_from_slice(&MAGIC);
         buf.push(VERSION);
         buf.push(PixelFormat::AntiAliased as u8);
         buf.extend_from_slice(&10u16.to_le_bytes()); // height
         buf.extend_from_slice(&2u32.to_le_bytes());  // char_count
+        buf.extend_from_slice(&8u16.to_le_bytes());  // baseline
         // Glyph A
         buf.extend_from_slice(&65u32.to_le_bytes());
         buf.extend_from_slice(&5u16.to_le_bytes());
@@ -355,7 +374,7 @@ mod text_renderer_tests {
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(10, 10));
-        let next = style.draw_string("A", Point::new(0, 10), embedded_graphics::text::Baseline::Bottom, &mut display).unwrap();
+        let next = style.draw_string("A", Point::zero(), Baseline::Top, &mut display).unwrap();
 
         // Next position: x = 0 + width(5) + default_spacing(2) = 7
         assert_eq!(next.x, 7);
@@ -379,7 +398,7 @@ mod text_renderer_tests {
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(12, 10));
-        let next = style.draw_string("AB", Point::new(0, 10), embedded_graphics::text::Baseline::Bottom, &mut display).unwrap();
+        let next = style.draw_string("AB", Point::zero(), Baseline::Top, &mut display).unwrap();
 
         // Next position: A(5+2) + B(5+2) - trailing spacing = 12
         // Actually: A at 0, B at 7, next after B = 7+5+2 = 14
@@ -404,11 +423,97 @@ mod text_renderer_tests {
         let font = CoreFont::new(&font_data).unwrap();
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
-        let metrics = style.measure_string("AB", Point::new(0, 10), embedded_graphics::text::Baseline::Bottom);
+        let metrics = style.measure_string("AB", Point::zero(), Baseline::Top);
 
         // Width = A(5) + spacing(2) + B(5) = 12
         assert_eq!(metrics.bounding_box.size.width, 12);
         assert_eq!(metrics.bounding_box.size.height, 10);
+    }
+
+    /// One glyph 'A', `width`×`height`, opaque only on rows `ink`.
+    fn make_font(height: u16, baseline: u16, width: u16, ink: core::ops::Range<u16>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.push(VERSION);
+        buf.push(PixelFormat::AntiAliased as u8);
+        buf.extend_from_slice(&height.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&baseline.to_le_bytes());
+        buf.extend_from_slice(&65u32.to_le_bytes());
+        buf.extend_from_slice(&width.to_le_bytes());
+        buf.extend_from_slice(&((HEADER_SIZE + GLYPH_ENTRY_SIZE) as u32).to_le_bytes());
+        for y in 0..height {
+            for _ in 0..width {
+                buf.push(if ink.contains(&y) { 255 } else { 0 });
+            }
+        }
+        buf
+    }
+
+    /// Rows of the display that received any ink.
+    fn ink_rows(display: &SimulatorDisplay<Rgb888>, size: Size) -> (i32, i32) {
+        let (mut top, mut bottom) = (-1, -1);
+        for y in 0..size.height as i32 {
+            for x in 0..size.width as i32 {
+                if display.get_pixel((x, y).into()) != Rgb888::BLACK {
+                    if top < 0 {
+                        top = y;
+                    }
+                    bottom = y;
+                    break;
+                }
+            }
+        }
+        (top, bottom)
+    }
+
+    #[test]
+    fn alphabetic_baseline_puts_the_last_ink_row_on_the_position() {
+        // Box of 10 rows, baseline after row 7 — so ink rows 0..=7 sit above it
+        // and rows 8..=9 are descender space.
+        let font_data = make_font(10, 8, 4, 0..8);
+        let font = CoreFont::new(&font_data).unwrap();
+        let style = FontTextStyle::new(&font, Rgb888::WHITE);
+
+        let size = Size::new(10, 30);
+        let mut display = SimulatorDisplay::<Rgb888>::new(size);
+        style
+            .draw_string("A", Point::new(0, 20), Baseline::Alphabetic, &mut display)
+            .unwrap();
+
+        // Exactly embedded-graphics' behaviour: a non-descending glyph ends on
+        // the row it was positioned at.
+        assert_eq!(ink_rows(&display, size), (13, 20));
+    }
+
+    #[test]
+    fn baseline_offsets_match_embedded_graphics() {
+        // Solid glyph, so the ink rows are the glyph box.
+        let font_data = make_font(10, 8, 4, 0..10);
+        let font = CoreFont::new(&font_data).unwrap();
+        let style = FontTextStyle::new(&font, Rgb888::WHITE);
+        let size = Size::new(10, 40);
+
+        // (baseline, expected top row of the box when drawn at y = 20)
+        let cases = [
+            (Baseline::Top, 20),
+            (Baseline::Bottom, 20 - 9),        // height - 1
+            (Baseline::Middle, 20 - 4),        // (height - 1) / 2
+            (Baseline::Alphabetic, 20 - 7),    // header.baseline - 1
+        ];
+        for (baseline, expected_top) in cases {
+            let mut display = SimulatorDisplay::<Rgb888>::new(size);
+            style
+                .draw_string("A", Point::new(0, 20), baseline, &mut display)
+                .unwrap();
+            let (top, bottom) = ink_rows(&display, size);
+            assert_eq!(top, expected_top, "{baseline:?} top");
+            assert_eq!(bottom, expected_top + 9, "{baseline:?} bottom");
+
+            // The reported bounding box must agree with what was drawn.
+            let metrics = style.measure_string("A", Point::new(0, 20), baseline);
+            assert_eq!(metrics.bounding_box.top_left.y, expected_top, "{baseline:?} bbox");
+        }
     }
 
     #[test]
@@ -428,8 +533,7 @@ mod text_renderer_tests {
         let style = FontTextStyle::new(&font, Rgb888::WHITE);
 
         let mut display = SimulatorDisplay::<Rgb888>::new(Size::new(20, 10));
-        // Use Baseline::Bottom so text is drawn at y=0..10
-        let text = Text::with_baseline("A", Point::new(0, 10), style, Baseline::Bottom);
+        let text = Text::with_baseline("A", Point::zero(), style, Baseline::Top);
         text.draw(&mut display).unwrap();
 
         // A should be white

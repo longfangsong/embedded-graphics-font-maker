@@ -46,7 +46,8 @@ small { color: #666; }
 <label for="size">3. Size &amp; Format</label>
 <div class="row">
 <div>
-<label for="size">Pixel Height</label>
+<label for="size">Font Size (px)</label>
+<small>(the stored glyph height is measured from the rendered ink, so it differs)</small>
 <input type="number" id="size" value="12" min="4" max="200">
 <div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">
 <button type="button" class="size-preset" data-size="8">8</button>
@@ -93,7 +94,7 @@ small { color: #666; }
 </section>
 
 <script type="module">
-import init, { convert_atlas } from './pkg/font_maker_cli.js?v=20';
+import init, { convert_atlas } from './pkg/font_maker_cli.js?v=21';
 
 const fontFile = document.getElementById('font-file');
 const charsInput = document.getElementById('chars');
@@ -135,6 +136,11 @@ function showStatus(msg, type) {
     if (type === 'ok') setTimeout(() => { status.style.display = 'none'; }, 4000);
 }
 
+/// Padding kept around the metrics box while rendering, so anti-aliasing that
+/// spills past the font's declared ascent/descent still lands on the canvas.
+/// It is cropped away again before the atlas is handed to WASM.
+const RENDER_PAD = 1;
+
 async function renderPreview() {
     if (!loadedFont || !charsInput.value) {
         canvas.style.display = 'none';
@@ -153,6 +159,23 @@ async function renderPreview() {
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
 
+    // Size the render box from the font's own vertical metrics rather than from
+    // the nominal pixel size — the two differ (PingFang, for one, declares a
+    // 1.06em ascent), and using the size would clip ascenders and descenders.
+    const fontMetrics = ctx.measureText(text);
+    const ascent = Math.ceil(
+        Number.isFinite(fontMetrics.fontBoundingBoxAscent)
+            ? fontMetrics.fontBoundingBoxAscent
+            : size
+    );
+    const descent = Math.ceil(
+        Number.isFinite(fontMetrics.fontBoundingBoxDescent)
+            ? fontMetrics.fontBoundingBoxDescent
+            : size * 0.5
+    );
+    const renderHeight = ascent + descent + 2 * RENDER_PAD;
+    const baselineY = RENDER_PAD + ascent;
+
     // Measure each char width
     const charWidths = [];
     let totalWidth = 0;
@@ -163,7 +186,7 @@ async function renderPreview() {
     }
 
     canvas.width = totalWidth + text.length * gap;
-    canvas.height = size;
+    canvas.height = renderHeight;
     canvas.style.display = 'block';
 
     // Reset context after resize (canvas.width/height clears all settings)
@@ -176,7 +199,6 @@ async function renderPreview() {
 
     // Render chars in white (alpha=1) at alphabetic baseline
     ctx.fillStyle = '#fff';
-    const baselineY = size * 0.75;
     let x = 0;
     for (let i = 0; i < text.length; i++) {
         ctx.fillText(text[i], x, baselineY);
@@ -208,22 +230,64 @@ async function renderPreview() {
         x += charWidths[i] + gap;
     }
 
-    // Now fill background black for visible preview (doesn't affect stored imgData)
+    // Crop the empty rows away: the glyph box is the union of every character's
+    // ink, so the font stores no blank rows and the baseline stays exact.
+    let top = -1, bottom = -1;
+    for (let y = 0; y < canvas.height; y++) {
+        let hasInk = false;
+        for (let cx = 0; cx < canvas.width; cx++) {
+            if (imgData.data[(y * canvas.width + cx) * 4 + 3] > 0) {
+                hasInk = true;
+                break;
+            }
+        }
+        if (hasInk) {
+            if (top < 0) top = y;
+            bottom = y;
+        }
+    }
+    if (top < 0) { // nothing drawn (e.g. only whitespace)
+        top = 0;
+        bottom = canvas.height - 1;
+    }
+
+    const boxHeight = bottom - top + 1;
+    const baseline = baselineY - top;
+    const atlas = new Uint8ClampedArray(canvas.width * boxHeight * 4);
+    atlas.set(imgData.data.subarray(
+        top * canvas.width * 4,
+        (bottom + 1) * canvas.width * 4,
+    ));
+
+    // Redraw the preview as the cropped atlas — what you see is what gets stored.
+    canvas.height = boxHeight;
+    ctx.font = fontStr;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#fff';
     let x2 = 0;
     for (let i = 0; i < text.length; i++) {
-        ctx.fillText(text[i], x2, baselineY);
+        ctx.fillText(text[i], x2, baseline);
         x2 += charWidths[i] + gap;
     }
 
-    showStatus('Preview rendered: ' + text.length + ' chars, ' + canvas.width + 'x' + canvas.height, 'ok');
+    showStatus(
+        `Preview rendered: ${text.length} chars, ${canvas.width}x${boxHeight}, `
+        + `baseline ${baseline} (font metrics: ascent ${ascent}, descent ${descent})`,
+        'ok'
+    );
 
     // Store for export
-    window._charWidths = charWidthsPrecise;
-    window._charPositions = charPositions;
-    window._imgData = imgData; // Save transparent-background image data for WASM
+    window._atlas = {
+        data: atlas, // transparent-background, row-cropped pixels for WASM
+        width: canvas.width,
+        height: boxHeight,
+        baseline,
+        charWidths: charWidthsPrecise,
+        charPositions,
+    };
 }
 
 convertBtn.addEventListener('click', async () => {
@@ -245,26 +309,25 @@ convertBtn.addEventListener('click', async () => {
     info.textContent = '';
 
     try {
-        // Use stored image data (transparent background)
-        const imageData = window._imgData;
-        if (!imageData) {
+        // Use the stored atlas (transparent background, rows cropped to ink)
+        const atlas = window._atlas;
+        if (!atlas) {
             showStatus('Please render preview first', 'err');
             return;
         }
-        const pixels = imageData.data; // Uint8ClampedArray
 
         const spacing = parseInt(spacingSelect.value);
         const format = formatSelect.value;
-        const size = parseInt(sizeInput.value) || 12;
         const chars = charsInput.value;
         const codePoints = Uint32Array.from(chars.split('').map(c => c.charCodeAt(0)));
-        const charWidths = Uint16Array.from(window._charWidths);
-        const charPositions = Uint32Array.from(window._charPositions);
+        const charWidths = Uint16Array.from(atlas.charWidths);
+        const charPositions = Uint32Array.from(atlas.charPositions);
 
-        const cropW = canvas.width;
-        const cropH = canvas.height;
-        const cropData = pixels;
-        console.log('WASM args:', { cropW, cropH, spacing, format });
+        const cropW = atlas.width;
+        const cropH = atlas.height;
+        const cropData = atlas.data;
+        const baseline = atlas.baseline;
+        console.log('WASM args:', { cropW, cropH, baseline, spacing, format });
         console.log('codes:', [...codePoints]);
         console.log('widths:', [...charWidths]);
         console.log('positions:', [...charPositions]);
@@ -272,7 +335,7 @@ convertBtn.addEventListener('click', async () => {
         const bytes = (() => {
             try {
                 console.log('Calling convert_atlas...');
-                const result = convert_atlas(cropData, cropW, cropH, codePoints, charWidths, charPositions);
+                const result = convert_atlas(cropData, cropW, cropH, codePoints, charWidths, charPositions, baseline);
                 console.log('Result length:', result.length);
                 return result;
             } catch (e) {
@@ -292,8 +355,14 @@ convertBtn.addEventListener('click', async () => {
         a.click();
         URL.revokeObjectURL(url);
 
-        info.textContent = `Done: ${charCount} characters, ${bytes.length} bytes`;
-        showStatus(`Font generated: ${charCount} chars, ${bytes.length} bytes`, 'ok');
+        info.textContent =
+            `Done: ${charCount} characters, ${bytes.length} bytes, `
+            + `height ${cropH}, baseline ${baseline}`;
+        showStatus(
+            `Font generated: ${charCount} chars, ${bytes.length} bytes, `
+            + `height ${cropH}, baseline ${baseline}`,
+            'ok'
+        );
     } catch (e) {
         showStatus('Error: ' + e.message, 'err');
     } finally {
